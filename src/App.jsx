@@ -336,6 +336,34 @@ function download(filename, text) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+function dataUrlToBlob(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== "string") {
+    throw new Error("Invalid data URL");
+  }
+
+  const [metadata, data] = dataUrl.split(",");
+  if (typeof data === "undefined") {
+    throw new Error("Malformed data URL");
+  }
+
+  const mimeMatch = metadata.match(/data:(.*?)(;base64)?$/);
+  const mimeType = mimeMatch && mimeMatch[1] ? mimeMatch[1] : "application/octet-stream";
+  const isBase64 = metadata.includes(";base64");
+
+  if (!isBase64) {
+    return new Blob([decodeURIComponent(data)], { type: mimeType });
+  }
+
+  const binary = atob(data);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+
+}
+
 function useDebounced(value, delay = 300) {
   const [v, setV] = useState(value);
   useEffect(() => {
@@ -468,73 +496,117 @@ export default function InterlockingDirectorsApp() {
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
   }, [displayGraph, minDegree, debouncedQuery]);
+  const exportPNG = async () => {
+    const captureCanvasImage = async (canvas) => {
+      const blob = await new Promise((resolve) => {
+        if (typeof canvas.toBlob !== 'function') {
+          resolve(null);
+          return;
+        }
+        try {
+          canvas.toBlob((result) => resolve(result || null), 'image/png');
+        } catch (err) {
+          console.warn('canvas.toBlob threw, will retry via data URL.', err);
+          resolve(null);
+        }
+      });
 
-  const exportPNG = () => {
-    const triggerDownload = (url) => {
-      if (!url) {
-        alert('Could not generate PNG.');
+      if (blob) {
+        return { blob, dataUrl: null };
+      }
+
+      let dataUrl;
+      try {
+        dataUrl = canvas.toDataURL('image/png');
+      } catch (err) {
+        throw err;
+      }
+
+      let fromDataUrl = null;
+      try {
+        fromDataUrl = dataUrlToBlob(dataUrl);
+      } catch (err) {
+        console.warn('Conversion from data URL to Blob failed.', err);
+      }
+
+      return { blob: fromDataUrl, dataUrl };
+    };
+
+    const cloneCanvas = (canvas) => {
+      const clone = document.createElement('canvas');
+      const bounds = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(1, canvas.width || Math.round(bounds.width * dpr));
+      const height = Math.max(1, canvas.height || Math.round(bounds.height * dpr));
+      clone.width = width;
+      clone.height = height;
+      const ctx = clone.getContext('2d');
+      if (!ctx) {
+        throw new Error('Could not access 2D context for canvas clone.');
+      }
+      ctx.drawImage(canvas, 0, 0, width, height);
+      return clone;
+    };
+
+    const deliverBlob = async (blob) => {
+      if (!(blob instanceof Blob)) {
+        throw new Error('Invalid PNG blob.');
+      }
+
+      const supportsPicker = typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function';
+      if (supportsPicker) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: 'interlocking-directors-graph.png',
+            types: [
+              {
+                description: 'PNG Image',
+                accept: { 'image/png': ['.png'] }
+              }
+            ]
+          });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          const previewUrl = URL.createObjectURL(blob);
+          updatePngUrl(previewUrl);
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            return;
+          }
+          console.warn('Save File Picker failed, falling back to download link.', err);
+        }
+      }
+
+      const objectUrl = URL.createObjectURL(blob);
+      const publish = (openTab) => {
+        updatePngUrl(objectUrl);
+        if (openTab) {
+          window.open(objectUrl, '_blank', 'noopener');
+        }
+      };
+
+      const isVivaldi = typeof navigator !== 'undefined' && /Vivaldi/i.test(navigator.userAgent || '');
+      if (isVivaldi) {
+        publish(true);
         return;
       }
 
       try {
         const a = document.createElement('a');
-        a.href = url;
+        a.href = objectUrl;
         a.download = 'interlocking-directors-graph.png';
         document.body.appendChild(a);
         a.click();
         a.remove();
-      } catch (e) {
-        console.warn('Automatic download blocked by browser.', e);
-      }
-
-      updatePngUrl(url);
-    };
-
-    const fallbackToDataUrl = (src) => {
-      let dataUrl = '';
-      try {
-        dataUrl = src.toDataURL('image/png');
+        publish(false);
       } catch (err) {
-        console.warn('Direct toDataURL failed, copying to temp canvas.', err);
-        const tmp = document.createElement('canvas');
-        const dpr = window.devicePixelRatio || 1;
-        const bounds = src.getBoundingClientRect();
-        const w = Math.max(src.width, Math.round(bounds.width * dpr));
-        const h = Math.max(src.height, Math.round(bounds.height * dpr));
-        tmp.width = w;
-        tmp.height = h;
-        const ctx = tmp.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(src, 0, 0, w, h);
-          if (typeof tmp.toBlob === 'function') {
-            tmp.toBlob((blob) => {
-              tmp.remove();
-              if (blob) {
-                const objectUrl = URL.createObjectURL(blob);
-                triggerDownload(objectUrl);
-              } else {
-                try {
-                  triggerDownload(tmp.toDataURL('image/png'));
-                } catch (e2) {
-                  console.warn('Temp canvas toDataURL also failed.', e2);
-                  triggerDownload('');
-                }
-              }
-            }, 'image/png');
-            return;
-          }
-          try {
-            dataUrl = tmp.toDataURL('image/png');
-          } catch (e2) {
-            console.warn('Temp canvas toDataURL failed.', e2);
-          }
-        }
-        setTimeout(() => tmp.remove(), 0);
+        console.warn('Automatic download failed, opening PNG in a new tab instead.', err);
+        publish(true);
       }
-
-      triggerDownload(dataUrl);
     };
-
+    
     const getCanvas = () => {
       const net = networkRef.current;
       if (net && net.canvas && net.canvas.frame && net.canvas.frame.canvas) {
@@ -551,18 +623,52 @@ export default function InterlockingDirectorsApp() {
       return;
     }
 
-    if (typeof src.toBlob === 'function') {
-      src.toBlob((blob) => {
-        if (blob) {
-          const objectUrl = URL.createObjectURL(blob);
-          triggerDownload(objectUrl);
-        } else {
-          fallbackToDataUrl(src);
+
+    const attemptCapture = async (canvas) => {
+      try {
+        return await captureCanvasImage(canvas);
+      } catch (err) {
+        console.warn('Primary canvas capture failed, retrying with clone.', err);
+        const clone = cloneCanvas(canvas);
+        try {
+          const result = await captureCanvasImage(clone);
+          return result;
+        } finally {
+          setTimeout(() => clone.remove(), 0);
         }
-      }, 'image/png');
-    } else {
-      fallbackToDataUrl(src);
+      }
+    };
+
+    let capture;
+    try {
+      capture = await attemptCapture(src);
+    } catch (err) {
+      console.error('Unable to export PNG from graph canvas.', err);
+      alert('Could not generate the PNG export. Try again after the graph finishes rendering.');
+      return;
     }
+
+    if (!capture || (!capture.blob && !capture.dataUrl)) {
+      alert('Graph rendering did not produce an image to export.');
+      return;
+    }
+
+    if (capture.blob) {
+      try {
+        await deliverBlob(capture.blob);
+        return;
+      } catch (err) {
+        console.error('Failed to hand off PNG blob for download.', err);
+      }
+    }
+
+    if (capture.dataUrl) {
+      updatePngUrl(capture.dataUrl);
+      window.open(capture.dataUrl, '_blank', 'noopener');
+    } else {
+      alert('PNG export failed. Please try using a different browser.');
+    }
+    
   };
 
   const exportReportCSV = () => {
