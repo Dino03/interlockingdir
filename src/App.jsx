@@ -75,6 +75,27 @@ D. Navarro,Zircon International
 C. Bautista,Zircon International
 `;
 
+const DEGREE_COPY = {
+  bipartite: {
+    label: "Minimum degree",
+    helper: (value) => value === 0
+      ? "Showing all directors and companies regardless of degree."
+      : `Showing nodes with degree ≥ ${value} (board connections).`
+  },
+  company: {
+    label: "Min shared-company links",
+    helper: (value) => value === 0
+      ? "Showing all companies regardless of shared directors."
+      : `Showing companies connected to ≥ ${value} other compan${value === 1 ? "y" : "ies"} via shared directors.`
+  },
+  director: {
+    label: "Min co-director links",
+    helper: (value) => value === 0
+      ? "Showing all directors regardless of shared boards."
+      : `Showing directors connected to ≥ ${value} other director${value === 1 ? "" : "s"} through shared boards.`
+  }
+};
+
 // Lightweight CSV parser for lines like: name, company
 function parseCSV(text) {
   const rows = [];
@@ -103,10 +124,15 @@ function toGraph(rows) {
   const degreePerson = new Map(people.map(p => [p, 0]));
   const degreeCompany = new Map(companies.map(c => [c, 0]));
 
+  const companySets = new Map(companies.map(c => [c, new Set()]));
+  const personSets = new Map(people.map(p => [p, new Set()]));
+
   const edges = [];
   for (const { person, company } of rows) {
     degreePerson.set(person, degreePerson.get(person) + 1);
     degreeCompany.set(company, degreeCompany.get(company) + 1);
+    companySets.get(company).add(person);
+    personSets.get(person).add(company);
     edges.push({ from: `P:${person}`, to: `C:${company}`, label: "" });
   }
 
@@ -133,10 +159,6 @@ function toGraph(rows) {
   ];
 
   // Company↔Company overlaps via shared directors
-  const companySets = new Map(companies.map(c => [c, new Set()]));
-  for (const { person, company } of rows) {
-    companySets.get(company).add(person);
-  }
   const companyOverlaps = [];
   for (let i = 0; i < companies.length; i++) {
     for (let j = i + 1; j < companies.length; j++) {
@@ -147,7 +169,31 @@ function toGraph(rows) {
     }
   }
 
-  return { nodes, edges, degreePerson, degreeCompany, people, companies, companyOverlaps };
+  const personOverlaps = [];
+  for (let i = 0; i < people.length; i++) {
+    for (let j = i + 1; j < people.length; j++) {
+      const a = people[i], b = people[j];
+      const A = personSets.get(a), B = personSets.get(b);
+      const inter = [...A].filter(x => B.has(x));
+      if (inter.length > 0) personOverlaps.push({ a, b, via: inter });
+    }
+  }
+
+  const personAffiliations = new Map([...personSets.entries()].map(([k, v]) => [k, [...v]]));
+  const companyAffiliations = new Map([...companySets.entries()].map(([k, v]) => [k, [...v]]));
+
+  return {
+    nodes,
+    edges,
+    degreePerson,
+    degreeCompany,
+    people,
+    companies,
+    companyOverlaps,
+    personOverlaps,
+    personAffiliations,
+    companyAffiliations
+  };
 }
 
 function genReport(graph) {
@@ -178,11 +224,116 @@ function genReport(graph) {
   return { summary, multiSeatDirectors, highOverlapPairs };
 }
 
+function createBipartiteGraph(base) {
+  const nodes = base.nodes.map(node => {
+    const isPerson = node.id.startsWith("P:");
+    const affiliation = isPerson
+      ? base.personAffiliations.get(node.label) || []
+      : base.companyAffiliations.get(node.label) || [];
+    const affiliationText = affiliation.length ? `\n${affiliation.join(", ")}` : "";
+    return {
+      ...node,
+      title: isPerson
+        ? `Boards served: ${affiliation.length}${affiliationText}`
+        : `Directors: ${affiliation.length}${affiliationText}`
+    };
+  });
+
+  const nodeDegrees = new Map();
+  for (const node of nodes) {
+    const deg = node.id.startsWith("P:")
+      ? base.degreePerson.get(node.label)
+      : base.degreeCompany.get(node.label);
+    nodeDegrees.set(node.id, deg || 0);
+  }
+
+  return { nodes, edges: base.edges, nodeDegrees };
+}
+
+function createCompanyCentricGraph(base) {
+  const nodes = base.companies.map(company => {
+    const directors = base.companyAffiliations.get(company) || [];
+    return {
+      id: `C:${company}`,
+      label: company,
+      shape: "box",
+      margin: 10,
+      widthConstraint: { maximum: 260 },
+      color: { background: "#f59e0b", border: "#b45309" },
+      font: { color: "#0b1220" },
+      title: directors.length
+        ? `Directors (${directors.length}):\n${directors.join(", ")}`
+        : "No listed directors",
+      size: 30
+    };
+  });
+
+  const nodeDegrees = new Map(nodes.map(node => [node.id, 0]));
+  const edges = base.companyOverlaps.map(({ a, b, via }) => {
+    const width = Math.min(6, 1 + via.length);
+    nodeDegrees.set(`C:${a}`, (nodeDegrees.get(`C:${a}`) || 0) + 1);
+    nodeDegrees.set(`C:${b}`, (nodeDegrees.get(`C:${b}`) || 0) + 1);
+    return {
+      from: `C:${a}`,
+      to: `C:${b}`,
+      width,
+      color: { color: "#94a3b8", highlight: "#475569", opacity: 0.45 },
+      smooth: false,
+      title: `Shared directors (${via.length}): ${via.join(", ")}`
+    };
+  });
+
+  return { nodes, edges, nodeDegrees };
+}
+
+function createDirectorCentricGraph(base) {
+  const nodes = base.people.map(person => {
+    const boards = base.personAffiliations.get(person) || [];
+    return {
+      id: `P:${person}`,
+      label: person,
+      shape: "dot",
+      size: 16 + Math.min(20, (boards.length - 1) * 3),
+      color: { background: "#2563eb", border: "#1e40af" },
+      font: { color: "#0b1220" },
+      title: boards.length
+        ? `Boards (${boards.length}):\n${boards.join(", ")}`
+        : "No listed boards"
+    };
+  });
+
+  const nodeDegrees = new Map(nodes.map(node => [node.id, 0]));
+  const edges = base.personOverlaps.map(({ a, b, via }) => {
+    const width = Math.min(6, 1 + via.length);
+    nodeDegrees.set(`P:${a}`, (nodeDegrees.get(`P:${a}`) || 0) + 1);
+    nodeDegrees.set(`P:${b}`, (nodeDegrees.get(`P:${b}`) || 0) + 1);
+    return {
+      from: `P:${a}`,
+      to: `P:${b}`,
+      width,
+      color: { color: "#94a3b8", highlight: "#2563eb", opacity: 0.45 },
+      smooth: false,
+      title: `Shared companies (${via.length}): ${via.join(", ")}`
+    };
+  });
+
+  return { nodes, edges, nodeDegrees };
+}
+
+function buildVisualization(base, mode) {
+  if (mode === "company") return createCompanyCentricGraph(base);
+  if (mode === "director") return createDirectorCentricGraph(base);
+  return createBipartiteGraph(base);
+}
+
 function download(filename, text) {
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.setAttribute("href", URL.createObjectURL(new Blob([text], { type: "text/plain" })));
-  a.setAttribute("download", filename);
+  a.href = url;
+  a.download = filename;
   a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function useDebounced(value, delay = 300) {
@@ -200,17 +351,60 @@ export default function InterlockingDirectorsApp() {
   const [query, setQuery] = useState("");
   const [showDebug, setShowDebug] = useState(false);
   const [testLog, setTestLog] = useState("");
+  const [viewMode, setViewMode] = useState("bipartite");
   const debouncedQuery = useDebounced(query, 200);
   const containerRef = useRef(null);
   const networkRef = useRef(null);
   const [pngUrl, setPngUrl] = useState(null);
+  const pngUrlRef = useRef(null);
+
+  const updatePngUrl = (url) => {
+    if (pngUrlRef.current && pngUrlRef.current.startsWith('blob:')) {
+      URL.revokeObjectURL(pngUrlRef.current);
+    }
+    pngUrlRef.current = url;
+    setPngUrl(url);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (pngUrlRef.current && pngUrlRef.current.startsWith('blob:')) {
+        URL.revokeObjectURL(pngUrlRef.current);
+      }
+    };
+  }, []);
+
   const openPngInNewTab = () => {
     if (pngUrl) window.open(pngUrl, '_blank', 'noopener');
   };
 
   const rows = useMemo(() => parseCSV(raw), [raw]);
-  const graph = useMemo(() => toGraph(rows), [rows]);
-  const report = useMemo(() => genReport(graph), [graph]);
+  const baseGraph = useMemo(() => toGraph(rows), [rows]);
+  const report = useMemo(() => genReport(baseGraph), [baseGraph]);
+  const displayGraph = useMemo(() => buildVisualization(baseGraph, viewMode), [baseGraph, viewMode]);
+  const maxDegree = useMemo(() => {
+    const values = Array.from(displayGraph.nodeDegrees.values());
+    return values.length ? Math.max(...values) : 0;
+  }, [displayGraph]);
+
+  useEffect(() => {
+    setMinDegree(prev => (prev > maxDegree ? maxDegree : prev));
+  }, [maxDegree]);
+
+  const sliderMax = Math.max(10, maxDegree);
+  const degreeCopy = DEGREE_COPY[viewMode] || DEGREE_COPY.bipartite;
+
+  const modeDescriptions = {
+    bipartite: "Directors connect directly to the companies where they serve. Degree counts the total relationships shown.",
+    company: "Companies connect when they share one or more directors. Degree counts how many other companies overlap.",
+    director: "Directors connect when they sit on the same company board. Degree counts how many other directors they intersect with."
+  };
+
+  const viewOptions = [
+    { key: "bipartite", label: "Combined" },
+    { key: "company", label: "Company-centric" },
+    { key: "director", label: "Director-centric" }
+  ];
 
   // Build the vis-network graph with filters
   useEffect(() => {
@@ -218,17 +412,15 @@ export default function InterlockingDirectorsApp() {
 
     const q = debouncedQuery.trim().toLowerCase();
 
-    const nodes = graph.nodes.filter(n => {
-      const deg = n.id.startsWith("P:")
-        ? graph.degreePerson.get(n.label)
-        : graph.degreeCompany.get(n.label);
+    const nodes = displayGraph.nodes.filter(n => {
+      const deg = displayGraph.nodeDegrees.get(n.id) || 0;
       const passDeg = deg >= (minDegree || 0);
       const passQ = q ? n.label.toLowerCase().includes(q) : true;
       return passDeg && passQ;
     });
 
     const nodeSet = new Set(nodes.map(n => n.id));
-    const edges = graph.edges.filter(e => nodeSet.has(e.from) && nodeSet.has(e.to));
+    const edges = displayGraph.edges.filter(e => nodeSet.has(e.from) && nodeSet.has(e.to));
 
     const options = {
       autoResize: true,
@@ -275,10 +467,74 @@ export default function InterlockingDirectorsApp() {
     const resize = () => net && net.redraw();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, [graph, minDegree, debouncedQuery]);
+  }, [displayGraph, minDegree, debouncedQuery]);
 
   const exportPNG = () => {
-    // Get the actual canvas from vis-network
+    const triggerDownload = (url) => {
+      if (!url) {
+        alert('Could not generate PNG.');
+        return;
+      }
+
+      try {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'interlocking-directors-graph.png';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } catch (e) {
+        console.warn('Automatic download blocked by browser.', e);
+      }
+
+      updatePngUrl(url);
+    };
+
+    const fallbackToDataUrl = (src) => {
+      let dataUrl = '';
+      try {
+        dataUrl = src.toDataURL('image/png');
+      } catch (err) {
+        console.warn('Direct toDataURL failed, copying to temp canvas.', err);
+        const tmp = document.createElement('canvas');
+        const dpr = window.devicePixelRatio || 1;
+        const bounds = src.getBoundingClientRect();
+        const w = Math.max(src.width, Math.round(bounds.width * dpr));
+        const h = Math.max(src.height, Math.round(bounds.height * dpr));
+        tmp.width = w;
+        tmp.height = h;
+        const ctx = tmp.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(src, 0, 0, w, h);
+          if (typeof tmp.toBlob === 'function') {
+            tmp.toBlob((blob) => {
+              tmp.remove();
+              if (blob) {
+                const objectUrl = URL.createObjectURL(blob);
+                triggerDownload(objectUrl);
+              } else {
+                try {
+                  triggerDownload(tmp.toDataURL('image/png'));
+                } catch (e2) {
+                  console.warn('Temp canvas toDataURL also failed.', e2);
+                  triggerDownload('');
+                }
+              }
+            }, 'image/png');
+            return;
+          }
+          try {
+            dataUrl = tmp.toDataURL('image/png');
+          } catch (e2) {
+            console.warn('Temp canvas toDataURL failed.', e2);
+          }
+        }
+        setTimeout(() => tmp.remove(), 0);
+      }
+
+      triggerDownload(dataUrl);
+    };
+
     const getCanvas = () => {
       const net = networkRef.current;
       if (net && net.canvas && net.canvas.frame && net.canvas.frame.canvas) {
@@ -295,46 +551,18 @@ export default function InterlockingDirectorsApp() {
       return;
     }
 
-    // Primary path: direct dataURL from the source canvas
-    let dataUrl = '';
-    try {
-      dataUrl = src.toDataURL('image/png');
-    } catch (e) {
-      console.warn('toDataURL failed, falling back to copy-to-temp-canvas', e);
-      // Fallback: copy to a temp canvas first
-      const tmp = document.createElement('canvas');
-      // Use devicePixelRatio for crispness
-      const dpr = window.devicePixelRatio || 1;
-      const b = src.getBoundingClientRect();
-      const w = Math.max(src.width, Math.round(b.width * dpr));
-      const h = Math.max(src.height, Math.round(b.height * dpr));
-      tmp.width = w;
-      tmp.height = h;
-      const ctx = tmp.getContext('2d');
-      ctx.drawImage(src, 0, 0, w, h);
-      dataUrl = tmp.toDataURL('image/png');
-      setTimeout(() => tmp.remove(), 0);
+    if (typeof src.toBlob === 'function') {
+      src.toBlob((blob) => {
+        if (blob) {
+          const objectUrl = URL.createObjectURL(blob);
+          triggerDownload(objectUrl);
+        } else {
+          fallbackToDataUrl(src);
+        }
+      }, 'image/png');
+    } else {
+      fallbackToDataUrl(src);
     }
-
-    if (!dataUrl) {
-      alert('Could not generate PNG.');
-      return;
-    }
-
-    // Try programmatic download first
-    try {
-      const a = document.createElement('a');
-      a.href = dataUrl;
-      a.download = 'interlocking-directors-graph.png';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    } catch (e) {
-      console.warn('Automatic download blocked by browser.', e);
-    }
-
-    // Always set preview URL so the user has a manual fallback
-    setPngUrl(dataUrl);
   };
 
   const exportReportCSV = () => {
@@ -477,31 +705,75 @@ export default function InterlockingDirectorsApp() {
                 onChange={(e) => setQuery(e.target.value)}
               />
             </div>
-            <label className="block text-sm text-slate-700">Minimum degree</label>
+            <label className="block text-sm text-slate-700">{degreeCopy.label}</label>
             <input
               type="range"
               min={0}
-              max={10}
+              max={sliderMax}
               value={minDegree}
               onChange={(e) => setMinDegree(parseInt(e.target.value || "0", 10))}
               className="w-full"
             />
-            <div className="text-sm text-slate-600">Showing nodes with degree ≥ <span className="font-semibold">{minDegree}</span></div>
-
-            {/* Legend */}
-            <div className="pt-2">
-              <div className="text-sm font-semibold mb-2">Legend</div>
-              <div className="grid grid-cols-2 gap-2 text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="inline-block h-3 w-3 rounded-full" style={{ background: "#2563eb" }}></span>
-                  Director (dot)
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="inline-block h-3 w-3" style={{ background: "#f59e0b" }}></span>
-                  Company (box)
-                </div>
+            <div className="text-sm text-slate-600">{degreeCopy.helper(minDegree)}</div>
+            <div className="border-t border-slate-100 pt-3">
+              <div className="text-sm font-semibold mb-2">Visualization focus</div>
+              <div className="grid grid-cols-3 gap-2 text-xs sm:text-sm">
+                {viewOptions.map(option => {
+                  const isActive = viewMode === option.key;
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      aria-pressed={isActive}
+                      onClick={() => setViewMode(option.key)}
+                      className={[
+                        "rounded-xl px-3 py-2 border transition",
+                        isActive
+                          ? "bg-slate-900 border-slate-900 text-white shadow"
+                          : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                      ].join(" ")}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
               </div>
-              <p className="text-xs text-slate-500 mt-2">Dot size scales with number of boards served.</p>
+              <p className="text-xs text-slate-500 mt-2 leading-snug">{modeDescriptions[viewMode]}</p>
+            </div>
+
+            <div className="border-t border-slate-100 pt-3">
+              <div className="text-sm font-semibold mb-2">Legend</div>
+              {viewMode === "bipartite" ? (
+                <>
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block h-3 w-3 rounded-full" style={{ background: "#2563eb" }}></span>
+                      Director (dot)
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block h-3 w-3" style={{ background: "#f59e0b" }}></span>
+                      Company (box)
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-2">Dots scale with number of boards served; edges show direct board appointments.</p>
+                </>
+              ) : viewMode === "company" ? (
+                <>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="inline-block h-3 w-3" style={{ background: "#f59e0b" }}></span>
+                    Company (box)
+                  </div>
+                  <p className="text-xs text-slate-500 mt-2">Lines connect companies sharing directors; thicker lines mean more shared directors.</p>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="inline-block h-3 w-3 rounded-full" style={{ background: "#2563eb" }}></span>
+                    Director (dot)
+                  </div>
+                  <p className="text-xs text-slate-500 mt-2">Node size scales with board seats; lines connect directors sitting on the same company.</p>
+                </>
+              )}
             </div>
           </div>
 
