@@ -361,6 +361,7 @@ function dataUrlToBlob(dataUrl) {
     bytes[i] = binary.charCodeAt(i);
   }
   return new Blob([bytes], { type: mimeType });
+
 }
 
 function useDebounced(value, delay = 300) {
@@ -495,7 +496,6 @@ export default function InterlockingDirectorsApp() {
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
   }, [displayGraph, minDegree, debouncedQuery]);
-
   const exportPNG = async () => {
     const captureCanvasImage = async (canvas) => {
       const blob = await new Promise((resolve) => {
@@ -606,7 +606,7 @@ export default function InterlockingDirectorsApp() {
         publish(true);
       }
     };
-
+    
     const getCanvas = () => {
       const net = networkRef.current;
       if (net && net.canvas && net.canvas.frame && net.canvas.frame.canvas) {
@@ -622,6 +622,7 @@ export default function InterlockingDirectorsApp() {
       alert('Graph canvas is not ready yet. Try again after the graph renders.');
       return;
     }
+
 
     const attemptCapture = async (canvas) => {
       try {
@@ -667,6 +668,7 @@ export default function InterlockingDirectorsApp() {
     } else {
       alert('PNG export failed. Please try using a different browser.');
     }
+    
   };
 
   const exportReportCSV = () => {
