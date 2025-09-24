@@ -15,14 +15,64 @@ import { Network } from "vis-network/standalone";
 
 const SAMPLE = `# Director,Company (CSV; lines starting with # are comments)
 # Tip: A director can appear on multiple lines with different companies
-Jane Dela Cruz, Golden Sun 999
-Jane Dela Cruz, Omni Energy
-Alan Reyes, Omni Energy
-Alan Reyes, Sunflare Corp
-M. Santos, Sunflare Corp
-M. Santos, Yatai Industries
-K. Tan, Yatai International
-K. Tan, Empire 999
+L. Garcia,Apex Mining
+Jane Dela Cruz,Apex Mining
+R. Mendoza,Aurora Biotech
+Jane Dela Cruz,Aurora Biotech
+H. Patel,Aurora Biotech
+P. Lim,Eastgate Foods
+L. Garcia,Eastgate Foods
+L. Garcia,Terra Finance
+K. Tan,Terra Finance
+C. Bautista,Terra Finance
+N. Singh,Empire Chemicals
+M. Yamada,Empire Chemicals
+M. Santos,Empire Chemicals
+C. Bautista,Empire Chemicals
+Alan Reyes,Empire Chemicals
+L. Garcia,Granite Cement
+Jane Dela Cruz,Granite Cement
+A. Ocampo,Granite Cement
+R. Mendoza,Helios Renewables
+M. Yamada,Helios Renewables
+Jane Dela Cruz,Helios Renewables
+E. Chen,Helios Renewables
+Alan Reyes,Helios Renewables
+S. Choi,Metro Orion
+H. Patel,Metro Orion
+E. Chen,Metro Orion
+C. Bautista,Metro Orion
+P. Lim,Northbridge Capital
+N. Singh,Northbridge Capital
+Jane Dela Cruz,Northbridge Capital
+D. Navarro,Northbridge Capital
+Alan Reyes,Northbridge Capital
+R. Mendoza,Atlantic Records
+M. Santos,Atlantic Records
+Jane Dela Cruz,Atlantic Records
+T. Wu,Pacifica Telecom
+S. Choi,Pacifica Telecom
+K. Tan,Pacifica Telecom
+T. Wu,Redwood Retail
+P. Lim,Silver Peak Logistics
+N. Singh,Silver Peak Logistics
+M. Yamada,Silver Peak Logistics
+M. Santos,Silver Peak Logistics
+T. Wu,Skyline Property
+S. Choi,Skyline Property
+K. Tan,Skyline Property
+T. Wu,Sunflare Corp
+Alan Reyes,Sunflare Corp
+P. Lim,Tristar Shipping
+D. Navarro,Tristar Shipping
+A. Ocampo,Tristar Shipping
+M. Santos,Zircon Industries
+K. Tan,Zircon Industries
+H. Patel,Zircon Industries
+E. Chen,Zircon Industries
+H. Patel,Zircon International
+D. Navarro,Zircon International
+C. Bautista,Zircon International
 `;
 
 // Lightweight CSV parser for lines like: name, company
