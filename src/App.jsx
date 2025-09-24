@@ -1008,57 +1008,6 @@ export default function InterlockingDirectorsApp() {
     };
   }, [displayGraph, baseGraph]);
 
-  useEffect(() => {
-    const net = networkRef.current;
-    if (!net) return;
-
-    const drawCliques = (ctx) => {
-      if (!ctx) return;
-      const visibleIds = new Set((visibleNodesRef.current || []).map(node => node.id));
-      cliqueVisuals.forEach(clique => {
-        const ids = clique.nodeIds.filter(id => visibleIds.has(id));
-        if (ids.length < 2) return;
-        const positions = net.getPositions(ids);
-        const points = ids
-          .map(id => positions[id])
-          .filter(pos => pos && Number.isFinite(pos.x) && Number.isFinite(pos.y))
-          .map(pos => net.canvasToDOM(pos));
-        if (points.length < 2) return;
-
-        let polygon;
-        if (points.length === 2) {
-          polygon = buildCapsuleAroundPair(points[0], points[1], 28);
-        } else {
-          const hull = computeConvexHull(points);
-          if (hull.length === 0) return;
-          polygon = expandPolygon(hull, 36);
-        }
-
-        if (!polygon || polygon.length < 3) return;
-
-        ctx.save();
-        ctx.beginPath();
-        polygon.forEach((point, index) => {
-          if (index === 0) ctx.moveTo(point.x, point.y);
-          else ctx.lineTo(point.x, point.y);
-        });
-        ctx.closePath();
-        ctx.fillStyle = clique.fill;
-        ctx.strokeStyle = clique.stroke;
-        ctx.lineWidth = 2;
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-      });
-    };
-
-    net.on('afterDrawing', drawCliques);
-    net.redraw();
-    return () => {
-      net.off('afterDrawing', drawCliques);
-    };
-  }, [cliqueVisuals]);
-
   const exportPNG = async () => {
     const captureCanvasImage = async (canvas) => {
       const blob = await new Promise((resolve) => {
