@@ -205,7 +205,225 @@ function toGraph(rows) {
     companyAffiliations,
     directorAdjacency,
     companyAdjacency
+
   };
+}
+
+function computeCentralization(values) {
+  if (!values || values.length === 0) return 0;
+  const max = Math.max(...values);
+  if (max <= 0) return 0;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const result = (max - mean) / max;
+  return Number(result.toFixed(4));
+}
+
+function computeCentralityMetrics(adjacency) {
+  const map = adjacency instanceof Map ? adjacency : new Map();
+  const nodes = Array.from(map.keys());
+  const n = nodes.length;
+
+  const degree = new Map();
+  const degreeRaw = new Map();
+  const closeness = new Map();
+  const betweenness = new Map();
+
+  if (n === 0) {
+    return {
+      degree,
+      degreeRaw,
+      closeness,
+      betweenness,
+      centralization: { degree: 0, closeness: 0, betweenness: 0 }
+    };
+  }
+
+  for (const node of nodes) {
+    const neighbors = map.get(node) || new Set();
+    const raw = neighbors.size;
+    degreeRaw.set(node, raw);
+    degree.set(node, n > 1 ? raw / (n - 1) : 0);
+  }
+
+  for (const source of nodes) {
+    const distances = new Map(nodes.map(node => [node, Infinity]));
+    distances.set(source, 0);
+    const queue = [source];
+    for (let i = 0; i < queue.length; i++) {
+      const current = queue[i];
+      const currentDistance = distances.get(current);
+      const neighbors = map.get(current) || new Set();
+      for (const neighbor of neighbors) {
+        if (distances.get(neighbor) === Infinity) {
+          distances.set(neighbor, currentDistance + 1);
+          queue.push(neighbor);
+        }
+      }
+    }
+
+    const reachableDistances = [];
+    distances.forEach((dist, node) => {
+      if (node !== source && Number.isFinite(dist) && dist > 0) reachableDistances.push(dist);
+    });
+
+    if (reachableDistances.length === 0) {
+      closeness.set(source, 0);
+    } else {
+      const totalDistance = reachableDistances.reduce((a, b) => a + b, 0);
+      const reachableCount = reachableDistances.length;
+      const reachRatio = n > 1 ? reachableCount / (n - 1) : 0;
+      const proximity = totalDistance > 0 ? reachableCount / totalDistance : 0;
+      closeness.set(source, reachRatio * proximity);
+    }
+  }
+
+  const betweennessRaw = new Map(nodes.map(node => [node, 0]));
+  for (const source of nodes) {
+    const stack = [];
+    const predecessors = new Map(nodes.map(node => [node, []]));
+    const sigma = new Map(nodes.map(node => [node, 0]));
+    const distance = new Map(nodes.map(node => [node, -1]));
+
+    sigma.set(source, 1);
+    distance.set(source, 0);
+
+    const queue = [source];
+    let qIndex = 0;
+    while (qIndex < queue.length) {
+      const v = queue[qIndex++];
+      stack.push(v);
+      const neighbors = map.get(v) || new Set();
+      for (const neighbor of neighbors) {
+        if (distance.get(neighbor) === -1) {
+          distance.set(neighbor, distance.get(v) + 1);
+          queue.push(neighbor);
+        }
+        if (distance.get(neighbor) === distance.get(v) + 1) {
+          sigma.set(neighbor, sigma.get(neighbor) + sigma.get(v));
+          predecessors.get(neighbor).push(v);
+        }
+      }
+    }
+
+    const delta = new Map(nodes.map(node => [node, 0]));
+    while (stack.length) {
+      const w = stack.pop();
+      const coefficient = 1 + delta.get(w);
+      for (const v of predecessors.get(w)) {
+        const sigmaW = sigma.get(w);
+        if (sigmaW === 0) continue;
+        const contribution = (sigma.get(v) / sigmaW) * coefficient;
+        delta.set(v, delta.get(v) + contribution);
+      }
+      if (w !== source) {
+        betweennessRaw.set(w, betweennessRaw.get(w) + delta.get(w));
+      }
+    }
+  }
+
+  const denom = n > 2 ? ((n - 1) * (n - 2) / 2) : 0;
+  for (const node of nodes) {
+    const rawValue = betweennessRaw.get(node) / 2; // undirected graph
+    betweenness.set(node, denom > 0 ? rawValue / denom : 0);
+  }
+
+  const centralization = {
+    degree: computeCentralization([...degree.values()]),
+    closeness: computeCentralization([...closeness.values()]),
+    betweenness: computeCentralization([...betweenness.values()])
+
+  };
+
+  return { degree, degreeRaw, closeness, betweenness, centralization };
+}
+
+function rankCentrality(map, rawMap = null, limit = 3) {
+  if (!(map instanceof Map)) return [];
+  const entries = Array.from(map.entries()).map(([name, score]) => ({
+    name,
+    score,
+    connections: rawMap instanceof Map ? (rawMap.get(name) ?? 0) : undefined
+  }));
+  entries.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.name.localeCompare(b.name);
+  });
+  return entries.slice(0, limit);
+}
+
+function findCliques(adjacency, minSize = 3) {
+  const map = adjacency instanceof Map ? adjacency : new Map();
+
+  const run = (threshold) => {
+    const nodes = Array.from(map.keys()).sort((a, b) => a.localeCompare(b));
+    const results = [];
+    const seen = new Set();
+
+    const bronKerbosch = (R, P, X) => {
+      if (P.size === 0 && X.size === 0) {
+        if (R.size >= threshold) {
+          const clique = Array.from(R).sort((a, b) => a.localeCompare(b));
+          const key = clique.join("||");
+          if (!seen.has(key)) {
+            seen.add(key);
+            results.push(clique);
+          }
+        }
+        return;
+      }
+
+      let pivot = null;
+      const union = new Set([...P, ...X]);
+      if (union.size > 0) {
+        pivot = union.values().next().value;
+      }
+      const pivotNeighbors = pivot ? (map.get(pivot) || new Set()) : new Set();
+      const candidates = [...P].filter(v => !pivotNeighbors.has(v));
+      for (const v of candidates) {
+        const neighbors = map.get(v) || new Set();
+        const newR = new Set(R);
+        newR.add(v);
+        const newP = new Set([...P].filter(u => neighbors.has(u)));
+        const newX = new Set([...X].filter(u => neighbors.has(u)));
+        bronKerbosch(newR, newP, newX);
+        P.delete(v);
+        X.add(v);
+      }
+    };
+
+    bronKerbosch(new Set(), new Set(nodes), new Set());
+
+    results.sort((a, b) => {
+      if (b.length !== a.length) return b.length - a.length;
+      return a.join("|").localeCompare(b.join("|"));
+    });
+
+    return { cliques: results, threshold };
+  };
+
+  const initial = run(minSize);
+  if (initial.cliques.length === 0 && minSize > 2) {
+    return run(2);
+  }
+  return initial;
+}
+
+function computeCrossCliqueConnectors(cliques) {
+  const counts = new Map();
+  for (const clique of cliques) {
+    const uniqueMembers = new Set(clique);
+    for (const member of uniqueMembers) {
+      counts.set(member, (counts.get(member) || 0) + 1);
+    }
+  }
+  return Array.from(counts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .filter(item => item.count > 1)
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return a.name.localeCompare(b.name);
+    })
+    .slice(0, 10);
 }
 
 function computeCentralization(values) {
@@ -569,9 +787,11 @@ function buildFocusGraph(base, bipartiteGraph, focusId) {
   const neighborIds = Array.from(new Set(neighborLabels.map(name => isPerson ? `C:${name}` : `P:${name}`)))
     .filter(id => nodeLookup.has(id));
 
+
   const radius = Math.max(220, neighborIds.length * 60);
   const nodes = [];
   const nodeDegrees = new Map();
+
 
   const highlightColor = (() => {
     if (!center.color) return null;
@@ -596,6 +816,7 @@ function buildFocusGraph(base, bipartiteGraph, focusId) {
     borderWidth: 3,
     color: highlightColor ? { ...center.color, ...highlightColor } : center.color,
     font: center.font ? { ...center.font, size: 18 } : undefined
+
   });
   nodeDegrees.set(focusId, neighborIds.length);
 
@@ -657,6 +878,7 @@ function buildVisualization(base, mode, focusNode) {
 
   return { ...bipartiteGraph, physicsEnabled: true, base: bipartiteGraph };
 }
+
 
 function computeConvexHull(points) {
   if (!Array.isArray(points) || points.length <= 1) {
@@ -1002,6 +1224,57 @@ export default function InterlockingDirectorsApp() {
     };
   }, [displayGraph, baseGraph]);
 
+  useEffect(() => {
+    const net = networkRef.current;
+    if (!net) return;
+
+    const drawCliques = (ctx) => {
+      if (!ctx) return;
+      const visibleIds = new Set((visibleNodesRef.current || []).map(node => node.id));
+      cliqueVisuals.forEach(clique => {
+        const ids = clique.nodeIds.filter(id => visibleIds.has(id));
+        if (ids.length < 2) return;
+        const positions = net.getPositions(ids);
+        const points = ids
+          .map(id => positions[id])
+          .filter(pos => pos && Number.isFinite(pos.x) && Number.isFinite(pos.y))
+          .map(pos => net.canvasToDOM(pos));
+        if (points.length < 2) return;
+
+        let polygon;
+        if (points.length === 2) {
+          polygon = buildCapsuleAroundPair(points[0], points[1], 28);
+        } else {
+          const hull = computeConvexHull(points);
+          if (hull.length === 0) return;
+          polygon = expandPolygon(hull, 36);
+        }
+
+        if (!polygon || polygon.length < 3) return;
+
+        ctx.save();
+        ctx.beginPath();
+        polygon.forEach((point, index) => {
+          if (index === 0) ctx.moveTo(point.x, point.y);
+          else ctx.lineTo(point.x, point.y);
+        });
+        ctx.closePath();
+        ctx.fillStyle = clique.fill;
+        ctx.strokeStyle = clique.stroke;
+        ctx.lineWidth = 2;
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      });
+    };
+
+    net.on('afterDrawing', drawCliques);
+    net.redraw();
+    return () => {
+      net.off('afterDrawing', drawCliques);
+    };
+  }, [cliqueVisuals]);
+
   const exportPNG = async () => {
     const captureCanvasImage = async (canvas) => {
       const blob = await new Promise((resolve) => {
@@ -1288,6 +1561,7 @@ export default function InterlockingDirectorsApp() {
     });
   }, [report.cliques]);
 
+
   useEffect(() => {
     const net = networkRef.current;
     if (!net) return;
@@ -1363,6 +1637,7 @@ export default function InterlockingDirectorsApp() {
     }
     setFocusNode(selectedNode);
   };
+
 
   const clearFocus = () => {
     if (viewMode === "bipartite") {
