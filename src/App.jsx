@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Download, Upload, RefreshCw, FileDown, Search, Info, Bug } from "lucide-react";
+import { Download, Upload, RefreshCw, FileDown, Search, Info } from "lucide-react";
 import { Network } from "vis-network/standalone";
 
 /**
@@ -10,8 +10,8 @@ import { Network } from "vis-network/standalone";
  * - Auto report: key metrics, directors with multiple seats, company overlaps
  * - Export: PNG of the graph + CSV of the report
  * - Filter/search by name or minimum degree
- * - Includes a small self-check test harness (Debug panel)
- */
+ * - Network analytics: centrality, clique detection, and centralization metrics
+*/
 
 const SAMPLE = `# Director,Company (CSV; lines starting with # are comments)
 # Tip: A director can appear on multiple lines with different companies
@@ -83,16 +83,16 @@ const DEGREE_COPY = {
       : `Showing nodes with degree ≥ ${value} (board connections).`
   },
   company: {
-    label: "Min shared-company links",
+    label: "Min direct director links",
     helper: (value) => value === 0
-      ? "Showing all companies regardless of shared directors."
-      : `Showing companies connected to ≥ ${value} other compan${value === 1 ? "y" : "ies"} via shared directors.`
+      ? "Showing the focused company with all of its directors."
+      : `Hiding directors with fewer than ${value} direct link${value === 1 ? "" : "s"} to the focused company.`
   },
   director: {
-    label: "Min co-director links",
+    label: "Min direct company links",
     helper: (value) => value === 0
-      ? "Showing all directors regardless of shared boards."
-      : `Showing directors connected to ≥ ${value} other director${value === 1 ? "" : "s"} through shared boards.`
+      ? "Showing the focused director with all of their companies."
+      : `Hiding companies with fewer than ${value} direct link${value === 1 ? "" : "s"} to the focused director.`
   }
 };
 
@@ -126,6 +126,8 @@ function toGraph(rows) {
 
   const companySets = new Map(companies.map(c => [c, new Set()]));
   const personSets = new Map(people.map(p => [p, new Set()]));
+  const directorAdjacency = new Map(people.map(p => [p, new Set()]));
+  const companyAdjacency = new Map(companies.map(c => [c, new Set()]));
 
   const edges = [];
   for (const { person, company } of rows) {
@@ -165,7 +167,11 @@ function toGraph(rows) {
       const a = companies[i], b = companies[j];
       const A = companySets.get(a), B = companySets.get(b);
       const inter = [...A].filter(x => B.has(x));
-      if (inter.length > 0) companyOverlaps.push({ a, b, via: inter });
+      if (inter.length > 0) {
+        companyOverlaps.push({ a, b, via: inter });
+        companyAdjacency.get(a).add(b);
+        companyAdjacency.get(b).add(a);
+      }
     }
   }
 
@@ -175,7 +181,11 @@ function toGraph(rows) {
       const a = people[i], b = people[j];
       const A = personSets.get(a), B = personSets.get(b);
       const inter = [...A].filter(x => B.has(x));
-      if (inter.length > 0) personOverlaps.push({ a, b, via: inter });
+      if (inter.length > 0) {
+        personOverlaps.push({ a, b, via: inter });
+        directorAdjacency.get(a).add(b);
+        directorAdjacency.get(b).add(a);
+      }
     }
   }
 
@@ -192,12 +202,238 @@ function toGraph(rows) {
     companyOverlaps,
     personOverlaps,
     personAffiliations,
-    companyAffiliations
+    companyAffiliations,
+    directorAdjacency,
+    companyAdjacency
   };
 }
 
+function computeCentralization(values) {
+  if (!values || values.length === 0) return 0;
+  const max = Math.max(...values);
+  if (max <= 0) return 0;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const result = (max - mean) / max;
+  return Number(result.toFixed(4));
+}
+
+function computeCentralityMetrics(adjacency) {
+  const map = adjacency instanceof Map ? adjacency : new Map();
+  const nodes = Array.from(map.keys());
+  const n = nodes.length;
+
+  const degree = new Map();
+  const degreeRaw = new Map();
+  const closeness = new Map();
+  const betweenness = new Map();
+
+  if (n === 0) {
+    return {
+      degree,
+      degreeRaw,
+      closeness,
+      betweenness,
+      centralization: { degree: 0, closeness: 0, betweenness: 0 }
+    };
+  }
+
+  for (const node of nodes) {
+    const neighbors = map.get(node) || new Set();
+    const raw = neighbors.size;
+    degreeRaw.set(node, raw);
+    degree.set(node, n > 1 ? raw / (n - 1) : 0);
+  }
+
+  for (const source of nodes) {
+    const distances = new Map(nodes.map(node => [node, Infinity]));
+    distances.set(source, 0);
+    const queue = [source];
+    for (let i = 0; i < queue.length; i++) {
+      const current = queue[i];
+      const currentDistance = distances.get(current);
+      const neighbors = map.get(current) || new Set();
+      for (const neighbor of neighbors) {
+        if (distances.get(neighbor) === Infinity) {
+          distances.set(neighbor, currentDistance + 1);
+          queue.push(neighbor);
+        }
+      }
+    }
+
+    const reachableDistances = [];
+    distances.forEach((dist, node) => {
+      if (node !== source && Number.isFinite(dist) && dist > 0) reachableDistances.push(dist);
+    });
+
+    if (reachableDistances.length === 0) {
+      closeness.set(source, 0);
+    } else {
+      const totalDistance = reachableDistances.reduce((a, b) => a + b, 0);
+      const reachableCount = reachableDistances.length;
+      const reachRatio = n > 1 ? reachableCount / (n - 1) : 0;
+      const proximity = totalDistance > 0 ? reachableCount / totalDistance : 0;
+      closeness.set(source, reachRatio * proximity);
+    }
+  }
+
+  const betweennessRaw = new Map(nodes.map(node => [node, 0]));
+  for (const source of nodes) {
+    const stack = [];
+    const predecessors = new Map(nodes.map(node => [node, []]));
+    const sigma = new Map(nodes.map(node => [node, 0]));
+    const distance = new Map(nodes.map(node => [node, -1]));
+
+    sigma.set(source, 1);
+    distance.set(source, 0);
+
+    const queue = [source];
+    let qIndex = 0;
+    while (qIndex < queue.length) {
+      const v = queue[qIndex++];
+      stack.push(v);
+      const neighbors = map.get(v) || new Set();
+      for (const neighbor of neighbors) {
+        if (distance.get(neighbor) === -1) {
+          distance.set(neighbor, distance.get(v) + 1);
+          queue.push(neighbor);
+        }
+        if (distance.get(neighbor) === distance.get(v) + 1) {
+          sigma.set(neighbor, sigma.get(neighbor) + sigma.get(v));
+          predecessors.get(neighbor).push(v);
+        }
+      }
+    }
+
+    const delta = new Map(nodes.map(node => [node, 0]));
+    while (stack.length) {
+      const w = stack.pop();
+      const coefficient = 1 + delta.get(w);
+      for (const v of predecessors.get(w)) {
+        const sigmaW = sigma.get(w);
+        if (sigmaW === 0) continue;
+        const contribution = (sigma.get(v) / sigmaW) * coefficient;
+        delta.set(v, delta.get(v) + contribution);
+      }
+      if (w !== source) {
+        betweennessRaw.set(w, betweennessRaw.get(w) + delta.get(w));
+      }
+    }
+  }
+
+  const denom = n > 2 ? ((n - 1) * (n - 2) / 2) : 0;
+  for (const node of nodes) {
+    const rawValue = betweennessRaw.get(node) / 2; // undirected graph
+    betweenness.set(node, denom > 0 ? rawValue / denom : 0);
+  }
+
+  const centralization = {
+    degree: computeCentralization([...degree.values()]),
+    closeness: computeCentralization([...closeness.values()]),
+    betweenness: computeCentralization([...betweenness.values()])
+  };
+
+  return { degree, degreeRaw, closeness, betweenness, centralization };
+}
+
+function rankCentrality(map, rawMap = null, limit = 3) {
+  if (!(map instanceof Map)) return [];
+  const entries = Array.from(map.entries()).map(([name, score]) => ({
+    name,
+    score,
+    connections: rawMap instanceof Map ? (rawMap.get(name) ?? 0) : undefined
+  }));
+  entries.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.name.localeCompare(b.name);
+  });
+  return entries.slice(0, limit);
+}
+
+function findCliques(adjacency, minSize = 3) {
+  const map = adjacency instanceof Map ? adjacency : new Map();
+
+  const run = (threshold) => {
+    const nodes = Array.from(map.keys()).sort((a, b) => a.localeCompare(b));
+    const results = [];
+    const seen = new Set();
+
+    const bronKerbosch = (R, P, X) => {
+      if (P.size === 0 && X.size === 0) {
+        if (R.size >= threshold) {
+          const clique = Array.from(R).sort((a, b) => a.localeCompare(b));
+          const key = clique.join("||");
+          if (!seen.has(key)) {
+            seen.add(key);
+            results.push(clique);
+          }
+        }
+        return;
+      }
+
+      let pivot = null;
+      const union = new Set([...P, ...X]);
+      if (union.size > 0) {
+        pivot = union.values().next().value;
+      }
+      const pivotNeighbors = pivot ? (map.get(pivot) || new Set()) : new Set();
+      const candidates = [...P].filter(v => !pivotNeighbors.has(v));
+      for (const v of candidates) {
+        const neighbors = map.get(v) || new Set();
+        const newR = new Set(R);
+        newR.add(v);
+        const newP = new Set([...P].filter(u => neighbors.has(u)));
+        const newX = new Set([...X].filter(u => neighbors.has(u)));
+        bronKerbosch(newR, newP, newX);
+        P.delete(v);
+        X.add(v);
+      }
+    };
+
+    bronKerbosch(new Set(), new Set(nodes), new Set());
+
+    results.sort((a, b) => {
+      if (b.length !== a.length) return b.length - a.length;
+      return a.join("|").localeCompare(b.join("|"));
+    });
+
+    return { cliques: results, threshold };
+  };
+
+  const initial = run(minSize);
+  if (initial.cliques.length === 0 && minSize > 2) {
+    return run(2);
+  }
+  return initial;
+}
+
+function computeCrossCliqueConnectors(cliques) {
+  const counts = new Map();
+  for (const clique of cliques) {
+    const uniqueMembers = new Set(clique);
+    for (const member of uniqueMembers) {
+      counts.set(member, (counts.get(member) || 0) + 1);
+    }
+  }
+  return Array.from(counts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .filter(item => item.count > 1)
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return a.name.localeCompare(b.name);
+    })
+    .slice(0, 10);
+}
+
 function genReport(graph) {
-  const { degreePerson, degreeCompany, people, companies, companyOverlaps } = graph;
+  const {
+    degreePerson,
+    degreeCompany,
+    people,
+    companies,
+    companyOverlaps,
+    directorAdjacency,
+    companyAdjacency
+  } = graph;
 
   const multiSeatDirectors = people
     .map(p => ({ name: p, boards: degreePerson.get(p) }))
@@ -221,7 +457,54 @@ function genReport(graph) {
     companyPairsWithOverlap: highOverlapPairs.length,
   };
 
-  return { summary, multiSeatDirectors, highOverlapPairs };
+  const directorCentrality = computeCentralityMetrics(directorAdjacency);
+  const companyCentrality = computeCentralityMetrics(companyAdjacency);
+
+  const centrality = {
+    directors: {
+      degree: rankCentrality(directorCentrality.degree, directorCentrality.degreeRaw),
+      closeness: rankCentrality(directorCentrality.closeness),
+      betweenness: rankCentrality(directorCentrality.betweenness),
+      centralization: directorCentrality.centralization
+    },
+    companies: {
+      degree: rankCentrality(companyCentrality.degree, companyCentrality.degreeRaw),
+      closeness: rankCentrality(companyCentrality.closeness),
+      betweenness: rankCentrality(companyCentrality.betweenness),
+      centralization: companyCentrality.centralization
+    }
+  };
+
+  const cliqueResult = findCliques(directorAdjacency);
+  const directorCliques = cliqueResult.cliques.map(members => ({
+    members,
+    size: members.length
+  }));
+  directorCliques.sort((a, b) => {
+    if (b.size !== a.size) return b.size - a.size;
+    return a.members.join("|").localeCompare(b.members.join("|"));
+  });
+
+  const crossCliqueConnectors = computeCrossCliqueConnectors(cliqueResult.cliques);
+
+  const cliqueSizes = directorCliques.map(c => c.size);
+  const largestCliqueSize = cliqueSizes.length ? Math.max(...cliqueSizes) : 0;
+
+  summary.directorCliques = directorCliques.length;
+  summary.largestDirectorClique = largestCliqueSize;
+  summary.crossCliqueConnectors = crossCliqueConnectors.length;
+
+  return {
+    summary,
+    multiSeatDirectors,
+    highOverlapPairs,
+    centrality,
+    cliques: {
+      directorCliques,
+      crossCliqueConnectors,
+      threshold: cliqueResult.threshold
+    }
+  };
 }
 
 function createBipartiteGraph(base) {
@@ -250,80 +533,191 @@ function createBipartiteGraph(base) {
   return { nodes, edges: base.edges, nodeDegrees };
 }
 
-function createCompanyCentricGraph(base) {
-  const nodes = base.companies.map(company => {
-    const directors = base.companyAffiliations.get(company) || [];
-    return {
-      id: `C:${company}`,
-      label: company,
-      shape: "box",
-      margin: 10,
-      widthConstraint: { maximum: 260 },
-      color: { background: "#f59e0b", border: "#b45309" },
-      font: { color: "#0b1220" },
-      title: directors.length
-        ? `Directors (${directors.length}):\n${directors.join(", ")}`
-        : "No listed directors",
-      size: 30
-    };
-  });
-
-  const nodeDegrees = new Map(nodes.map(node => [node.id, 0]));
-  const edges = base.companyOverlaps.map(({ a, b, via }) => {
-    const width = Math.min(6, 1 + via.length);
-    nodeDegrees.set(`C:${a}`, (nodeDegrees.get(`C:${a}`) || 0) + 1);
-    nodeDegrees.set(`C:${b}`, (nodeDegrees.get(`C:${b}`) || 0) + 1);
-    return {
-      from: `C:${a}`,
-      to: `C:${b}`,
-      width,
-      color: { color: "#94a3b8", highlight: "#475569", opacity: 0.45 },
-      smooth: false,
-      title: `Shared directors (${via.length}): ${via.join(", ")}`
-    };
-  });
-
-  return { nodes, edges, nodeDegrees };
+function getNodeType(nodeId) {
+  if (typeof nodeId !== "string") return "unknown";
+  if (nodeId.startsWith("P:")) return "person";
+  if (nodeId.startsWith("C:")) return "company";
+  return "unknown";
 }
 
-function createDirectorCentricGraph(base) {
-  const nodes = base.people.map(person => {
-    const boards = base.personAffiliations.get(person) || [];
+function buildFocusGraph(base, bipartiteGraph, focusId) {
+  if (!focusId) {
     return {
-      id: `P:${person}`,
-      label: person,
-      shape: "dot",
-      size: 16 + Math.min(20, (boards.length - 1) * 3),
-      color: { background: "#2563eb", border: "#1e40af" },
-      font: { color: "#0b1220" },
-      title: boards.length
-        ? `Boards (${boards.length}):\n${boards.join(", ")}`
-        : "No listed boards"
+      nodes: [],
+      edges: [],
+      nodeDegrees: new Map(),
+      physicsEnabled: false
     };
+  }
+
+  const nodeLookup = new Map(bipartiteGraph.nodes.map(node => [node.id, node]));
+  const center = nodeLookup.get(focusId);
+  if (!center) {
+    return {
+      nodes: [],
+      edges: [],
+      nodeDegrees: new Map(),
+      physicsEnabled: false
+    };
+  }
+
+  const isPerson = focusId.startsWith("P:");
+  const label = center.label;
+  const neighborLabels = isPerson
+    ? base.personAffiliations.get(label) || []
+    : base.companyAffiliations.get(label) || [];
+  const neighborIds = Array.from(new Set(neighborLabels.map(name => isPerson ? `C:${name}` : `P:${name}`)))
+    .filter(id => nodeLookup.has(id));
+
+  const radius = Math.max(220, neighborIds.length * 60);
+  const nodes = [];
+  const nodeDegrees = new Map();
+
+  const highlightColor = (() => {
+    if (!center.color) return null;
+    if (isPerson) {
+      return {
+        background: center.color.background,
+        border: "#1d4ed8"
+      };
+    }
+    return {
+      background: center.color.background,
+      border: "#c2410c"
+    };
+  })();
+
+  nodes.push({
+    ...center,
+    x: 0,
+    y: 0,
+    physics: false,
+    fixed: { x: true, y: true },
+    borderWidth: 3,
+    color: highlightColor ? { ...center.color, ...highlightColor } : center.color,
+    font: center.font ? { ...center.font, size: 18 } : undefined
+  });
+  nodeDegrees.set(focusId, neighborIds.length);
+
+  neighborIds.forEach((neighborId, index) => {
+    const neighbor = nodeLookup.get(neighborId);
+    if (!neighbor) return;
+    const angle = neighborIds.length > 0
+      ? (2 * Math.PI * index) / neighborIds.length
+      : 0;
+    const x = Math.cos(angle) * radius;
+    const y = Math.sin(angle) * radius;
+
+    nodes.push({
+      ...neighbor,
+      x,
+      y,
+      physics: false,
+      fixed: { x: true, y: true }
+    });
+    nodeDegrees.set(neighborId, (nodeDegrees.get(neighborId) || 0) + 1);
   });
 
-  const nodeDegrees = new Map(nodes.map(node => [node.id, 0]));
-  const edges = base.personOverlaps.map(({ a, b, via }) => {
-    const width = Math.min(6, 1 + via.length);
-    nodeDegrees.set(`P:${a}`, (nodeDegrees.get(`P:${a}`) || 0) + 1);
-    nodeDegrees.set(`P:${b}`, (nodeDegrees.get(`P:${b}`) || 0) + 1);
-    return {
-      from: `P:${a}`,
-      to: `P:${b}`,
-      width,
-      color: { color: "#94a3b8", highlight: "#2563eb", opacity: 0.45 },
-      smooth: false,
-      title: `Shared companies (${via.length}): ${via.join(", ")}`
-    };
-  });
+  const edges = neighborIds.map(neighborId => ({
+    from: focusId,
+    to: neighborId,
+    smooth: false,
+    width: 2.5,
+    color: { color: "#475569", highlight: "#1f2937", opacity: 0.6 }
+  }));
 
-  return { nodes, edges, nodeDegrees };
+  return { nodes, edges, nodeDegrees, physicsEnabled: false };
 }
 
-function buildVisualization(base, mode) {
-  if (mode === "company") return createCompanyCentricGraph(base);
-  if (mode === "director") return createDirectorCentricGraph(base);
-  return createBipartiteGraph(base);
+function buildVisualization(base, mode, focusNode) {
+  const bipartiteGraph = createBipartiteGraph(base);
+  if (mode === "bipartite") {
+    if (focusNode && focusNode.id) {
+      const focused = buildFocusGraph(base, bipartiteGraph, focusNode.id);
+      return { ...focused, base: bipartiteGraph };
+    }
+    return { ...bipartiteGraph, physicsEnabled: true, base: bipartiteGraph };
+  }
+
+  if (mode === "company") {
+    const focusId = focusNode && focusNode.id && focusNode.id.startsWith("C:")
+      ? focusNode.id
+      : null;
+    const focused = buildFocusGraph(base, bipartiteGraph, focusId);
+    return { ...focused, base: bipartiteGraph };
+  }
+
+  if (mode === "director") {
+    const focusId = focusNode && focusNode.id && focusNode.id.startsWith("P:")
+      ? focusNode.id
+      : null;
+    const focused = buildFocusGraph(base, bipartiteGraph, focusId);
+    return { ...focused, base: bipartiteGraph };
+  }
+
+  return { ...bipartiteGraph, physicsEnabled: true, base: bipartiteGraph };
+}
+
+function computeConvexHull(points) {
+  if (!Array.isArray(points) || points.length <= 1) {
+    return Array.isArray(points) ? [...points] : [];
+  }
+  const sorted = [...points].sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+  upper.pop();
+  lower.pop();
+  return lower.concat(upper);
+}
+
+function expandPolygon(points, padding = 24) {
+  if (!Array.isArray(points) || points.length === 0) {
+    return [];
+  }
+  const centroid = points.reduce((acc, point) => ({
+    x: acc.x + point.x,
+    y: acc.y + point.y
+  }), { x: 0, y: 0 });
+  centroid.x /= points.length;
+  centroid.y /= points.length;
+  return points.map(point => {
+    const dx = point.x - centroid.x;
+    const dy = point.y - centroid.y;
+    const distance = Math.sqrt(dx * dx + dy * dy) || 1;
+    const factor = (distance + padding) / distance;
+    return {
+      x: centroid.x + dx * factor,
+      y: centroid.y + dy * factor
+    };
+  });
+}
+
+function buildCapsuleAroundPair(a, b, padding = 24) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const distance = Math.sqrt(dx * dx + dy * dy) || 1;
+  const nx = (dy / distance) * padding;
+  const ny = (-dx / distance) * padding;
+  return [
+    { x: a.x - nx, y: a.y - ny },
+    { x: a.x + nx, y: a.y + ny },
+    { x: b.x + nx, y: b.y + ny },
+    { x: b.x - nx, y: b.y - ny }
+  ];
 }
 
 function download(filename, text) {
@@ -377,14 +771,15 @@ export default function InterlockingDirectorsApp() {
   const [raw, setRaw] = useState(SAMPLE);
   const [minDegree, setMinDegree] = useState(0);
   const [query, setQuery] = useState("");
-  const [showDebug, setShowDebug] = useState(false);
-  const [testLog, setTestLog] = useState("");
   const [viewMode, setViewMode] = useState("bipartite");
   const debouncedQuery = useDebounced(query, 200);
   const containerRef = useRef(null);
   const networkRef = useRef(null);
   const [pngUrl, setPngUrl] = useState(null);
   const pngUrlRef = useRef(null);
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [focusNode, setFocusNode] = useState(null);
+  const visibleNodesRef = useRef([]);
 
   const updatePngUrl = (url) => {
     if (pngUrlRef.current && pngUrlRef.current.startsWith('blob:')) {
@@ -409,11 +804,44 @@ export default function InterlockingDirectorsApp() {
   const rows = useMemo(() => parseCSV(raw), [raw]);
   const baseGraph = useMemo(() => toGraph(rows), [rows]);
   const report = useMemo(() => genReport(baseGraph), [baseGraph]);
-  const displayGraph = useMemo(() => buildVisualization(baseGraph, viewMode), [baseGraph, viewMode]);
+  const displayGraph = useMemo(
+    () => buildVisualization(baseGraph, viewMode, focusNode),
+    [baseGraph, viewMode, focusNode]
+  );
   const maxDegree = useMemo(() => {
     const values = Array.from(displayGraph.nodeDegrees.values());
     return values.length ? Math.max(...values) : 0;
   }, [displayGraph]);
+
+  useEffect(() => {
+    if (!focusNode) return;
+    const exists = baseGraph.nodes.some(node => node.id === focusNode.id);
+    if (!exists) {
+      setFocusNode(null);
+    }
+  }, [baseGraph, focusNode]);
+
+  useEffect(() => {
+    if (viewMode === "company") {
+      if (!focusNode || !focusNode.id || !focusNode.id.startsWith("C:")) {
+        const first = baseGraph.companies[0];
+        if (first) {
+          setFocusNode({ id: `C:${first}`, label: first, type: "company" });
+        } else {
+          setFocusNode(null);
+        }
+      }
+    } else if (viewMode === "director") {
+      if (!focusNode || !focusNode.id || !focusNode.id.startsWith("P:")) {
+        const first = baseGraph.people[0];
+        if (first) {
+          setFocusNode({ id: `P:${first}`, label: first, type: "person" });
+        } else {
+          setFocusNode(null);
+        }
+      }
+    }
+  }, [viewMode, baseGraph, focusNode]);
 
   useEffect(() => {
     setMinDegree(prev => (prev > maxDegree ? maxDegree : prev));
@@ -423,9 +851,9 @@ export default function InterlockingDirectorsApp() {
   const degreeCopy = DEGREE_COPY[viewMode] || DEGREE_COPY.bipartite;
 
   const modeDescriptions = {
-    bipartite: "Directors connect directly to the companies where they serve. Degree counts the total relationships shown.",
-    company: "Companies connect when they share one or more directors. Degree counts how many other companies overlap.",
-    director: "Directors connect when they sit on the same company board. Degree counts how many other directors they intersect with."
+    bipartite: "Directors connect directly to the companies where they serve. Use the focus controls to center any node and view its immediate ties.",
+    company: "Highlights one company in the middle with its directors orbiting around it. Pick a different company by using the focus controls.",
+    director: "Highlights one director in the middle with their companies surrounding them. Switch focus to another director to inspect their web of boards."
   };
 
   const viewOptions = [
@@ -439,42 +867,65 @@ export default function InterlockingDirectorsApp() {
     if (!containerRef.current) return;
 
     const q = debouncedQuery.trim().toLowerCase();
+    const queryActive = q.length > 0;
+    const availableNodes = displayGraph.nodes || [];
+    const availableEdges = displayGraph.edges || [];
+    const physicsEnabled = displayGraph.physicsEnabled !== false;
 
-    const nodes = displayGraph.nodes.filter(n => {
-      const deg = displayGraph.nodeDegrees.get(n.id) || 0;
+    let allowedIds = null;
+    if (queryActive) {
+      const matched = new Set();
+      availableNodes.forEach(node => {
+        const label = (node.label || "").toLowerCase();
+        if (label.includes(q)) matched.add(node.id);
+      });
+      const neighbors = new Set();
+      availableEdges.forEach(edge => {
+        if (matched.has(edge.from)) neighbors.add(edge.to);
+        if (matched.has(edge.to)) neighbors.add(edge.from);
+      });
+      allowedIds = new Set([...matched, ...neighbors]);
+    }
+
+    const nodes = availableNodes.filter(node => {
+      const deg = displayGraph.nodeDegrees.get(node.id) || 0;
       const passDeg = deg >= (minDegree || 0);
-      const passQ = q ? n.label.toLowerCase().includes(q) : true;
-      return passDeg && passQ;
+      if (!queryActive) return passDeg;
+      if (allowedIds && allowedIds.size > 0) {
+        return passDeg && allowedIds.has(node.id);
+      }
+      return false;
     });
 
-    const nodeSet = new Set(nodes.map(n => n.id));
-    const edges = displayGraph.edges.filter(e => nodeSet.has(e.from) && nodeSet.has(e.to));
+    const nodeSet = new Set(nodes.map(node => node.id));
+    const edges = availableEdges.filter(edge => nodeSet.has(edge.from) && nodeSet.has(edge.to));
+
+    visibleNodesRef.current = nodes;
 
     const options = {
       autoResize: true,
       physics: {
+        enabled: physicsEnabled,
         solver: 'barnesHut',
-        // Make the layout calmer and reduce "bounce"
-        stabilization: { iterations: 400, fit: true },
+        stabilization: physicsEnabled ? { iterations: 400, fit: true } : false,
         barnesHut: {
-          gravitationalConstant: -8000,   // weaker repulsion than before (-25000)
-          centralGravity: 0.15,           // pull a bit toward center
-          springLength: 180,              // longer springs = less jitter
-          springConstant: 0.02,           // softer springs
-          damping: 0.75,                  // higher damping = less bouncy
+          gravitationalConstant: -8000,
+          centralGravity: 0.15,
+          springLength: 180,
+          springConstant: 0.02,
+          damping: 0.75,
           avoidOverlap: 0.3
         },
         timestep: 0.25,
-        adaptiveTimestep: true,
-        minVelocity: 1.0
+        adaptiveTimestep: physicsEnabled,
+        minVelocity: physicsEnabled ? 1.0 : 0.5
       },
-      layout: { improvedLayout: true },
+      layout: { improvedLayout: physicsEnabled },
       nodes: {
         shadow: true,
         font: { face: "Inter, system-ui, sans-serif", size: 14 }
       },
       edges: {
-        // Make lines straighter / less flexible
         smooth: false,
         arrows: { to: { enabled: false } },
         color: { opacity: 0.4 }
@@ -487,15 +938,70 @@ export default function InterlockingDirectorsApp() {
     if (!networkRef.current) {
       networkRef.current = new Network(containerRef.current, data, options);
     } else {
-      networkRef.current.setData(data);
       networkRef.current.setOptions(options);
+      networkRef.current.setData(data);
     }
 
     const net = networkRef.current;
+    if (net && !physicsEnabled) {
+      const nodeIds = nodes.map(node => node.id);
+      if (nodeIds.length > 0) {
+        net.fit({ nodes: nodeIds, animation: { duration: 600, easingFunction: 'easeInOutQuad' } });
+      }
+    }
+
     const resize = () => net && net.redraw();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
   }, [displayGraph, minDegree, debouncedQuery]);
+
+  useEffect(() => {
+    if (!selectedNode) return;
+    const stillVisible = (visibleNodesRef.current || []).some(node => node.id === selectedNode.id);
+    if (!stillVisible) {
+      setSelectedNode(null);
+    }
+  }, [displayGraph, selectedNode]);
+
+  useEffect(() => {
+    const net = networkRef.current;
+    if (!net) return;
+
+    const findNode = (id) => {
+      const visible = (visibleNodesRef.current || []).find(node => node.id === id);
+      if (visible) return visible;
+      const baseNode = (displayGraph.base?.nodes || []).find(node => node.id === id);
+      if (baseNode) return baseNode;
+      return baseGraph.nodes.find(node => node.id === id);
+    };
+
+    const handleSelectNode = (params) => {
+      if (!params.nodes || params.nodes.length === 0) return;
+      const id = params.nodes[0];
+      const node = findNode(id);
+      const label = node?.label || id.replace(/^P:/, "").replace(/^C:/, "");
+      setSelectedNode({ id, label, type: getNodeType(id) });
+    };
+
+    const handleDeselectNode = () => setSelectedNode(null);
+
+    const handleClick = (params) => {
+      if (!params.nodes || params.nodes.length === 0) {
+        setSelectedNode(null);
+      }
+    };
+
+    net.on('selectNode', handleSelectNode);
+    net.on('deselectNode', handleDeselectNode);
+    net.on('click', handleClick);
+
+    return () => {
+      net.off('selectNode', handleSelectNode);
+      net.off('deselectNode', handleDeselectNode);
+      net.off('click', handleClick);
+    };
+  }, [displayGraph, baseGraph]);
+
   const exportPNG = async () => {
     const captureCanvasImage = async (canvas) => {
       const blob = await new Promise((resolve) => {
@@ -672,7 +1178,11 @@ export default function InterlockingDirectorsApp() {
   };
 
   const exportReportCSV = () => {
-    const { summary, multiSeatDirectors, highOverlapPairs } = report;
+    const { summary, multiSeatDirectors, highOverlapPairs, centrality, cliques } = report;
+    const formatScore = (value) => {
+      if (typeof value !== "number" || Number.isNaN(value)) return "0.000";
+      return value.toFixed(3);
+    };
     const lines = [];
     lines.push("Section,Field,Value");
     lines.push(`Summary,Total Companies,${summary.totalCompanies}`);
@@ -681,6 +1191,18 @@ export default function InterlockingDirectorsApp() {
     lines.push(`Summary,Avg Boards/Director,${summary.avgBoardsPerDirector}`);
     lines.push(`Summary,Directors with &gt;1 seat,${summary.directorsWithMultipleSeats}`);
     lines.push(`Summary,Company pairs with overlap,${summary.companyPairsWithOverlap}`);
+    lines.push(`Summary,Director cliques identified,${summary.directorCliques || 0}`);
+    lines.push(`Summary,Largest director clique,${summary.largestDirectorClique || 0}`);
+    lines.push(`Summary,Cross-clique connectors,${summary.crossCliqueConnectors || 0}`);
+
+    const directorCentralization = centrality?.directors?.centralization || {};
+    const companyCentralization = centrality?.companies?.centralization || {};
+    lines.push(`Summary,Director centralization (degree),${formatScore(directorCentralization.degree || 0)}`);
+    lines.push(`Summary,Director centralization (closeness),${formatScore(directorCentralization.closeness || 0)}`);
+    lines.push(`Summary,Director centralization (betweenness),${formatScore(directorCentralization.betweenness || 0)}`);
+    lines.push(`Summary,Company centralization (degree),${formatScore(companyCentralization.degree || 0)}`);
+    lines.push(`Summary,Company centralization (closeness),${formatScore(companyCentralization.closeness || 0)}`);
+    lines.push(`Summary,Company centralization (betweenness),${formatScore(companyCentralization.betweenness || 0)}`);
     lines.push("");
     lines.push("Directors with Multiple Seats,Director,Boards");
     for (const d of multiSeatDirectors) lines.push(`Director,${d.name},${d.boards}`);
@@ -688,60 +1210,167 @@ export default function InterlockingDirectorsApp() {
     lines.push("Company Overlaps,Company Pair,Shared Directors,Via");
     for (const p of highOverlapPairs) lines.push(`Overlap,${p.pair},${p.shared},"${p.via.join(" | ")}` + `"`);
 
+    const directorCentralityLists = centrality?.directors || {};
+    const companyCentralityLists = centrality?.companies || {};
+    const addCentralityRows = (title, lists) => {
+      lines.push("");
+      lines.push(`${title},Measure,Name,Score,Details`);
+      const measures = [
+        ["Degree", lists.degree || []],
+        ["Closeness", lists.closeness || []],
+        ["Betweenness", lists.betweenness || []]
+      ];
+      for (const [label, items] of measures) {
+        for (const item of items) {
+          const detail = typeof item.connections === "number"
+            ? `Connections: ${item.connections}`
+            : "";
+          lines.push(`${title},${label},${item.name},${formatScore(item.score)},${detail}`);
+        }
+      }
+    };
+
+    addCentralityRows("Director Centrality", directorCentralityLists);
+    addCentralityRows("Company Centrality", companyCentralityLists);
+
+    const cliqueGroups = cliques?.directorCliques || [];
+    lines.push("");
+    lines.push("Director Cliques,Size,Members");
+    for (const clique of cliqueGroups) {
+      lines.push(`Clique,${clique.size},"${clique.members.join(" | ")}` + `"`);
+    }
+
+    const connectorRows = cliques?.crossCliqueConnectors || [];
+    lines.push("");
+    lines.push("Cross-Clique Connectors,Name,Cliques Participated");
+    for (const connector of connectorRows) {
+      lines.push(`Connector,${connector.name},${connector.count}`);
+    }
+
     download("interlocking-report.csv", lines.join("\n"));
   };
 
-  const resetSample = () => setRaw(SAMPLE);
-
-  // --- Simple self-check tests ---
-  const runSelfChecks = () => {
-    const results = [];
-
-    // Test 1: parseCSV basic & comments
-    const t1Input = `# comment\nA, X\nA, Y\nB, Y\n`;
-    const t1Rows = parseCSV(t1Input);
-    results.push({ test: "parseCSV basic", expectRows: 3, gotRows: t1Rows.length, pass: t1Rows.length === 3 });
-
-    // Test 2: duplicate edges counted
-    const t2Input = `A, X\nA, X\n`;
-    const t2 = toGraph(parseCSV(t2Input));
-    results.push({ test: "duplicate edges count", expectEdges: 2, gotEdges: t2.edges.length, pass: t2.edges.length === 2 });
-    results.push({ test: "degree counts duplicates (person)", expect: 2, got: t2.degreePerson.get("A"), pass: t2.degreePerson.get("A") === 2 });
-
-    // Test 3: report metrics
-    const t3 = toGraph(parseCSV(`A,X\nA,Y\nB,Y\n`));
-    const r3 = genReport(t3);
-    results.push({ test: "summary counts", expect: { companies: 2, directors: 2, seats: 3 }, got: { companies: r3.summary.totalCompanies, directors: r3.summary.totalDirectors, seats: r3.summary.totalBoardSeats }, pass: r3.summary.totalCompanies === 2 && r3.summary.totalDirectors === 2 && r3.summary.totalBoardSeats === 3 });
-    results.push({ test: "avg boards per director", expect: 1.5, got: r3.summary.avgBoardsPerDirector, pass: r3.summary.avgBoardsPerDirector === 1.5 });
-    results.push({ test: "multi-seat directors", expect: 1, got: r3.multiSeatDirectors.length, pass: r3.multiSeatDirectors.length === 1 });
-    results.push({ test: "company pairs with overlap", expect: 1, got: r3.summary.companyPairsWithOverlap, pass: r3.summary.companyPairsWithOverlap === 1 });
-
-    // Test 4: overlap details (via specific director)
-    const t4 = toGraph(parseCSV(`A,X\nB,X\nA,Y\n`)); // Overlap X-Y via A only
-    const r4 = genReport(t4);
-    const pairXY = r4.highOverlapPairs.find(p => p.pair === 'X ↔ Y' || p.pair === 'Y ↔ X');
-    results.push({ test: "overlap via list exists", expect: true, got: Boolean(pairXY), pass: Boolean(pairXY) });
-    results.push({ test: "overlap count correct", expect: 1, got: pairXY ? pairXY.shared : null, pass: pairXY ? pairXY.shared === 1 : false });
-    results.push({ test: "overlap via contains A", expect: true, got: pairXY ? pairXY.via.includes('A') : null, pass: pairXY ? pairXY.via.includes('A') : false });
-
-    // Test 5: empty dataset yields zeros
-    const t5 = toGraph(parseCSV(""));
-    const r5 = genReport(t5);
-    results.push({ test: "empty rows -> zero counts", expect: { companies: 0, directors: 0, seats: 0 }, got: { companies: r5.summary.totalCompanies, directors: r5.summary.totalDirectors, seats: r5.summary.totalBoardSeats }, pass: r5.summary.totalCompanies === 0 && r5.summary.totalDirectors === 0 && r5.summary.totalBoardSeats === 0 });
-
-    // Test 6: parser trims/ignores blank lines
-    const t6Input = `\n\n  A , X  \n\nB,  Y \n`;
-    const t6 = parseCSV(t6Input);
-    results.push({ test: "parser trims and ignores blanks", expectRows: 2, gotRows: t6.length, pass: t6.length === 2 });
-
-    // Test 7: no overlaps when no shared directors
-    const t7 = toGraph(parseCSV(`A,X\nB,Y\nC,Z\n`));
-    const r7 = genReport(t7);
-    results.push({ test: "no overlaps", expect: 0, got: r7.summary.companyPairsWithOverlap, pass: r7.summary.companyPairsWithOverlap === 0 });
-
-    setTestLog(JSON.stringify({ results }, null, 2));
-    setShowDebug(true);
+  const formatCentrality = (value) => (typeof value === "number" && !Number.isNaN(value) ? value.toFixed(3) : "0.000");
+  const defaultCentralization = { degree: 0, closeness: 0, betweenness: 0 };
+  const directorCentralityData = {
+    degree: report.centrality?.directors?.degree || [],
+    closeness: report.centrality?.directors?.closeness || [],
+    betweenness: report.centrality?.directors?.betweenness || [],
+    centralization: report.centrality?.directors?.centralization || defaultCentralization
   };
+  const companyCentralityData = {
+    degree: report.centrality?.companies?.degree || [],
+    closeness: report.centrality?.companies?.closeness || [],
+    betweenness: report.centrality?.companies?.betweenness || [],
+    centralization: report.centrality?.companies?.centralization || defaultCentralization
+  };
+  const directorCliques = report.cliques?.directorCliques || [];
+  const crossCliqueConnectors = report.cliques?.crossCliqueConnectors || [];
+  const cliqueThreshold = report.cliques?.threshold || 3;
+  const cliqueVisuals = useMemo(() => {
+    const palette = [
+      { fill: "rgba(59,130,246,0.12)", stroke: "rgba(37,99,235,0.55)" },
+      { fill: "rgba(249,115,22,0.12)", stroke: "rgba(234,88,12,0.55)" },
+      { fill: "rgba(16,185,129,0.12)", stroke: "rgba(5,150,105,0.55)" },
+      { fill: "rgba(244,114,182,0.12)", stroke: "rgba(219,39,119,0.45)" },
+      { fill: "rgba(165,180,252,0.12)", stroke: "rgba(99,102,241,0.5)" },
+      { fill: "rgba(251,191,36,0.12)", stroke: "rgba(217,119,6,0.5)" }
+    ];
+    const groups = report.cliques?.directorCliques || [];
+    return groups.map((clique, index) => {
+      const paletteEntry = palette[index % palette.length];
+      return {
+        key: `clique-${index}`,
+        nodeIds: clique.members.map(name => `P:${name}`),
+        fill: paletteEntry.fill,
+        stroke: paletteEntry.stroke
+      };
+    });
+  }, [report.cliques]);
+
+  useEffect(() => {
+    const net = networkRef.current;
+    if (!net) return;
+
+    const drawCliques = (ctx) => {
+      if (!ctx) return;
+      const visibleIds = new Set((visibleNodesRef.current || []).map(node => node.id));
+      cliqueVisuals.forEach(clique => {
+        const ids = clique.nodeIds.filter(id => visibleIds.has(id));
+        if (ids.length < 2) return;
+        const positions = net.getPositions(ids);
+        const points = ids
+          .map(id => positions[id])
+          .filter(pos => pos && Number.isFinite(pos.x) && Number.isFinite(pos.y))
+          .map(pos => net.canvasToDOM(pos));
+        if (points.length < 2) return;
+
+        let polygon;
+        if (points.length === 2) {
+          polygon = buildCapsuleAroundPair(points[0], points[1], 28);
+        } else {
+          const hull = computeConvexHull(points);
+          if (hull.length === 0) return;
+          polygon = expandPolygon(hull, 36);
+        }
+
+        if (!polygon || polygon.length < 3) return;
+
+        ctx.save();
+        ctx.beginPath();
+        polygon.forEach((point, index) => {
+          if (index === 0) ctx.moveTo(point.x, point.y);
+          else ctx.lineTo(point.x, point.y);
+        });
+        ctx.closePath();
+        ctx.fillStyle = clique.fill;
+        ctx.strokeStyle = clique.stroke;
+        ctx.lineWidth = 2;
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      });
+    };
+
+    net.on('afterDrawing', drawCliques);
+    net.redraw();
+    return () => {
+      net.off('afterDrawing', drawCliques);
+    };
+  }, [cliqueVisuals]);
+
+  const renderCentralityItems = (items, keyPrefix, includeConnections = false) => {
+    if (!items || items.length === 0) {
+      return [<li key={`${keyPrefix}-empty`} className="text-slate-500">No data</li>];
+    }
+    return items.map(item => (
+      <li key={`${keyPrefix}-${item.name}`} className="flex justify-between gap-2">
+        <span>{item.name}</span>
+        <span className="text-slate-500">
+          {formatCentrality(item.score)}
+          {includeConnections && typeof item.connections === "number" ? ` (${item.connections})` : ""}
+        </span>
+      </li>
+    ));
+  };
+
+  const handleFocusSelection = () => {
+    if (!selectedNode) return;
+    if (viewMode === "company" && selectedNode.type !== "company") {
+      setViewMode("director");
+    } else if (viewMode === "director" && selectedNode.type !== "person") {
+      setViewMode("company");
+    }
+    setFocusNode(selectedNode);
+  };
+
+  const clearFocus = () => {
+    if (viewMode === "bipartite") {
+      setFocusNode(null);
+    }
+  };
+
+  const resetSample = () => setRaw(SAMPLE);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -757,9 +1386,6 @@ export default function InterlockingDirectorsApp() {
             </button>
             <button onClick={exportReportCSV} className="inline-flex items-center gap-2 rounded-2xl px-3 py-2 bg-white border border-slate-200 hover:bg-slate-50">
               <FileDown className="h-4 w-4"/> Report CSV
-            </button>
-            <button onClick={runSelfChecks} className="inline-flex items-center gap-2 rounded-2xl px-3 py-2 bg-white border border-slate-200 hover:bg-slate-50">
-              <Bug className="h-4 w-4"/> Run self-checks
             </button>
           </div>
         </div>
@@ -861,24 +1487,81 @@ export default function InterlockingDirectorsApp() {
                       Company (box)
                     </div>
                   </div>
-                  <p className="text-xs text-slate-500 mt-2">Dots scale with number of boards served; edges show direct board appointments.</p>
+                  <p className="text-xs text-slate-500 mt-2">Dots scale with number of boards served; edges show direct board appointments. Shaded halos outline detected director cliques.</p>
                 </>
               ) : viewMode === "company" ? (
                 <>
-                  <div className="flex items-center gap-2 text-sm">
-                    <span className="inline-block h-3 w-3" style={{ background: "#f59e0b" }}></span>
-                    Company (box)
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block h-3 w-3" style={{ background: "#f59e0b" }}></span>
+                      Company (center)
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block h-3 w-3 rounded-full" style={{ background: "#2563eb" }}></span>
+                      Directors (ring)
+                    </div>
                   </div>
-                  <p className="text-xs text-slate-500 mt-2">Lines connect companies sharing directors; thicker lines mean more shared directors.</p>
+                  <p className="text-xs text-slate-500 mt-2">The selected company stays in the middle with its directors arranged around it.</p>
                 </>
               ) : (
                 <>
-                  <div className="flex items-center gap-2 text-sm">
-                    <span className="inline-block h-3 w-3 rounded-full" style={{ background: "#2563eb" }}></span>
-                    Director (dot)
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block h-3 w-3 rounded-full" style={{ background: "#2563eb" }}></span>
+                      Director (center)
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block h-3 w-3" style={{ background: "#f59e0b" }}></span>
+                      Companies (ring)
+                    </div>
                   </div>
-                  <p className="text-xs text-slate-500 mt-2">Node size scales with board seats; lines connect directors sitting on the same company.</p>
+                  <p className="text-xs text-slate-500 mt-2">The selected director anchors the view with their companies orbiting around them.</p>
                 </>
+              )}
+            </div>
+
+            <div className="border-t border-slate-100 pt-3 space-y-2">
+              <div className="text-sm font-semibold">Focus layout</div>
+              <p className="text-xs text-slate-500 leading-snug">Select a node on the canvas and click focus to center it and display its direct connections like a web.</p>
+              {focusNode ? (
+                <div className="flex items-center justify-between text-xs text-slate-600">
+                  <span>Focused on: <span className="font-medium text-slate-700">{focusNode.label}</span></span>
+                  {viewMode === "bipartite" && (
+                    <button
+                      type="button"
+                      onClick={clearFocus}
+                      className="text-blue-600 hover:underline"
+                    >
+                      Show full network
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="text-xs text-slate-500">Full network shown.</div>
+              )}
+              {selectedNode ? (
+                <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-xs text-slate-600">
+                    Selected: <span className="font-medium text-slate-700">{selectedNode.label}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleFocusSelection}
+                    className="w-full rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white shadow hover:opacity-90"
+                  >
+                    Focus on {selectedNode.label}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedNode(null)}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50"
+                  >
+                    Clear selection
+                  </button>
+                  <p className="text-[11px] text-slate-500">The view switches to match the node type when focusing.</p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 italic">Click a node in the canvas to enable the focus button.</p>
               )}
             </div>
           </div>
@@ -893,6 +1576,9 @@ export default function InterlockingDirectorsApp() {
               <dt className="text-slate-500">Avg boards / director</dt><dd>{report.summary.avgBoardsPerDirector}</dd>
               <dt className="text-slate-500">Directors with &gt; 1 seat</dt><dd>{report.summary.directorsWithMultipleSeats}</dd>
               <dt className="text-slate-500">Company pairs w/ overlap</dt><dd>{report.summary.companyPairsWithOverlap}</dd>
+              <dt className="text-slate-500">Director cliques</dt><dd>{report.summary.directorCliques}</dd>
+              <dt className="text-slate-500">Largest clique size</dt><dd>{report.summary.largestDirectorClique}</dd>
+              <dt className="text-slate-500">Cross-clique connectors</dt><dd>{report.summary.crossCliqueConnectors}</dd>
             </dl>
 
             {report.multiSeatDirectors.length > 0 && (
@@ -922,6 +1608,117 @@ export default function InterlockingDirectorsApp() {
                 </ul>
               </div>
             )}
+
+            <div className="mt-3 space-y-3">
+              <div>
+                <div className="text-sm font-semibold mb-1">Director centrality (top 3)</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <div className="font-medium text-slate-600">Degree</div>
+                    <ul className="mt-1 space-y-1">
+                      {renderCentralityItems(directorCentralityData.degree, "director-degree", true)}
+                    </ul>
+                  </div>
+                  <div>
+                    <div className="font-medium text-slate-600">Closeness</div>
+                    <ul className="mt-1 space-y-1">
+                      {renderCentralityItems(directorCentralityData.closeness, "director-closeness")}
+                    </ul>
+                  </div>
+                  <div>
+                    <div className="font-medium text-slate-600">Betweenness</div>
+                    <ul className="mt-1 space-y-1">
+                      {renderCentralityItems(directorCentralityData.betweenness, "director-betweenness")}
+                    </ul>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-500 mt-2">Scores are normalized between 0 and 1. Degree values show the normalized score with raw connections in parentheses.</p>
+              </div>
+
+              <div>
+                <div className="text-sm font-semibold mb-1">Director network centralization</div>
+                <ul className="text-xs space-y-1">
+                  <li className="flex justify-between gap-2"><span>Degree</span><span className="font-mono">{formatCentrality(directorCentralityData.centralization.degree)}</span></li>
+                  <li className="flex justify-between gap-2"><span>Closeness</span><span className="font-mono">{formatCentrality(directorCentralityData.centralization.closeness)}</span></li>
+                  <li className="flex justify-between gap-2"><span>Betweenness</span><span className="font-mono">{formatCentrality(directorCentralityData.centralization.betweenness)}</span></li>
+                </ul>
+              </div>
+
+              <div>
+                <div className="text-sm font-semibold mb-1">Company centrality (top 3)</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <div className="font-medium text-slate-600">Degree</div>
+                    <ul className="mt-1 space-y-1">
+                      {renderCentralityItems(companyCentralityData.degree, "company-degree", true)}
+                    </ul>
+                  </div>
+                  <div>
+                    <div className="font-medium text-slate-600">Closeness</div>
+                    <ul className="mt-1 space-y-1">
+                      {renderCentralityItems(companyCentralityData.closeness, "company-closeness")}
+                    </ul>
+                  </div>
+                  <div>
+                    <div className="font-medium text-slate-600">Betweenness</div>
+                    <ul className="mt-1 space-y-1">
+                      {renderCentralityItems(companyCentralityData.betweenness, "company-betweenness")}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-sm font-semibold mb-1">Company network centralization</div>
+                <ul className="text-xs space-y-1">
+                  <li className="flex justify-between gap-2"><span>Degree</span><span className="font-mono">{formatCentrality(companyCentralityData.centralization.degree)}</span></li>
+                  <li className="flex justify-between gap-2"><span>Closeness</span><span className="font-mono">{formatCentrality(companyCentralityData.centralization.closeness)}</span></li>
+                  <li className="flex justify-between gap-2"><span>Betweenness</span><span className="font-mono">{formatCentrality(companyCentralityData.centralization.betweenness)}</span></li>
+                </ul>
+              </div>
+
+              <div>
+                <div className="text-sm font-semibold mb-1">Director cliques</div>
+                {directorCliques.length > 0 ? (
+                  <>
+                    <p className="text-xs text-slate-500">
+                      {cliqueThreshold >= 3
+                        ? `Cliques require at least ${cliqueThreshold} directors all connected through shared boards.`
+                        : "No 3+ director cliques detected; displaying tightly linked director pairs."}
+                    </p>
+                    <ul className="text-xs space-y-1 max-h-40 overflow-auto pr-1 mt-2">
+                      {directorCliques.map((clique, index) => (
+                        <li key={`clique-${clique.members.join('|')}`} className="flex flex-col gap-1">
+                          <div className="flex justify-between gap-2">
+                            <span>Group {index + 1}</span>
+                            <span className="text-slate-500">{clique.size} {clique.size === 1 ? "member" : "members"}</span>
+                          </div>
+                          <div className="text-slate-500">{clique.members.join(" • ")}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-500">No director cliques detected.</p>
+                )}
+              </div>
+
+              <div>
+                <div className="text-sm font-semibold mb-1">Cross-clique connectors</div>
+                {crossCliqueConnectors.length > 0 ? (
+                  <ul className="text-xs space-y-1">
+                    {crossCliqueConnectors.map(item => (
+                      <li key={`connector-${item.name}`} className="flex justify-between gap-2">
+                        <span>{item.name}</span>
+                        <span className="text-slate-500">{item.count} {item.count === 1 ? "clique" : "cliques"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-slate-500">No directors participate in multiple cliques.</p>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* PNG Preview & Manual Save */}
@@ -937,13 +1734,6 @@ export default function InterlockingDirectorsApp() {
             </div>
           )}
 
-          {/* Debug Panel */}
-          {showDebug && (
-            <div className="bg-white rounded-2xl shadow p-4 space-y-2">
-              <div className="flex items-center gap-2 text-slate-700"><Bug className="h-4 w-4"/> Self-check results</div>
-              <pre className="text-xs bg-slate-100 rounded-xl p-2 overflow-auto max-h-48">{testLog || "No results yet."}</pre>
-            </div>
-          )}
         </section>
 
         {/* Right: Graph */}
