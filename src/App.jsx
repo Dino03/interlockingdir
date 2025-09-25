@@ -915,6 +915,32 @@ function expandPolygon(points, padding = 24) {
   });
 }
 
+function smoothPolygon(points, iterations = 1) {
+  if (!Array.isArray(points) || points.length < 3) {
+    return Array.isArray(points) ? [...points] : [];
+  }
+  let current = [...points];
+  for (let iter = 0; iter < iterations; iter += 1) {
+    const next = [];
+    for (let i = 0; i < current.length; i += 1) {
+      const a = current[i];
+      const b = current[(i + 1) % current.length];
+      next.push(
+        {
+          x: a.x * 0.75 + b.x * 0.25,
+          y: a.y * 0.75 + b.y * 0.25
+        },
+        {
+          x: a.x * 0.25 + b.x * 0.75,
+          y: a.y * 0.25 + b.y * 0.75
+        }
+      );
+    }
+    current = next;
+  }
+  return current;
+}
+
 function buildCapsuleAroundPair(a, b, padding = 24) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
@@ -927,6 +953,47 @@ function buildCapsuleAroundPair(a, b, padding = 24) {
     { x: b.x + nx, y: b.y + ny },
     { x: b.x - nx, y: b.y - ny }
   ];
+}
+
+function drawRoundedPolygon(ctx, points, radius = 18) {
+  if (!ctx || !Array.isArray(points) || points.length === 0) return;
+  if (points.length === 1) {
+    ctx.beginPath();
+    ctx.arc(points[0].x, points[0].y, radius, 0, Math.PI * 2);
+    ctx.closePath();
+    return;
+  }
+
+  const segments = points.map((point, index) => {
+    const prev = points[(index - 1 + points.length) % points.length];
+    const next = points[(index + 1) % points.length];
+    const toPrev = { x: prev.x - point.x, y: prev.y - point.y };
+    const toNext = { x: next.x - point.x, y: next.y - point.y };
+    const prevLen = Math.hypot(toPrev.x, toPrev.y) || 1;
+    const nextLen = Math.hypot(toNext.x, toNext.y) || 1;
+    const cornerRadius = Math.min(radius, prevLen / 2, nextLen / 2);
+    const start = {
+      x: point.x + (toPrev.x / prevLen) * cornerRadius,
+      y: point.y + (toPrev.y / prevLen) * cornerRadius
+    };
+    const end = {
+      x: point.x + (toNext.x / nextLen) * cornerRadius,
+      y: point.y + (toNext.y / nextLen) * cornerRadius
+    };
+    return { start, corner: point, end };
+  });
+
+  ctx.beginPath();
+  ctx.moveTo(segments[0].start.x, segments[0].start.y);
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i];
+    if (i > 0) {
+      ctx.lineTo(segment.start.x, segment.start.y);
+    }
+    ctx.quadraticCurveTo(segment.corner.x, segment.corner.y, segment.end.x, segment.end.y);
+  }
+  ctx.lineTo(segments[0].start.x, segments[0].start.y);
+  ctx.closePath();
 }
 
 function download(filename, text) {
@@ -980,6 +1047,7 @@ export default function InterlockingDirectorsApp() {
   const [raw, setRaw] = useState(SAMPLE);
   const [minDegree, setMinDegree] = useState(0);
   const [cliqueSizeFilter, setCliqueSizeFilter] = useState(3);
+  const [haloMode, setHaloMode] = useState("clique");
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState("bipartite");
   const [debugEnabled, setDebugEnabled] = useState(false);
@@ -1080,6 +1148,9 @@ export default function InterlockingDirectorsApp() {
     company: "Rebalances the entire network so every company sits at the heart of its director circle. Shared directors naturally land between overlapping firms.",
     director: "Repositions the full graph with directors anchoring their companies. Firms shared by multiple directors fall between the cliques they connect."
   };
+  const haloDescription = haloMode === "company"
+    ? "Shaded halos outline each company's board members."
+    : "Shaded halos outline detected director cliques.";
 
   const viewOptions = [
     { key: "bipartite", label: "Combined" },
@@ -1536,7 +1607,21 @@ export default function InterlockingDirectorsApp() {
     () => computeCrossCliqueConnectors(filteredDirectorCliques.map(clique => clique.members)),
     [filteredDirectorCliques]
   );
-  const cliqueVisuals = useMemo(() => {
+  const companyHaloGroups = useMemo(() => {
+    if (!baseGraph || !Array.isArray(baseGraph.companies)) return [];
+    return baseGraph.companies
+      .map(company => {
+        const members = baseGraph.companyAffiliations.get(company) || [];
+        const uniqueMembers = Array.from(new Set(members)).filter(Boolean);
+        return {
+          key: `company-${company}`,
+          label: company,
+          members: uniqueMembers
+        };
+      })
+      .filter(group => group.members.length >= 2);
+  }, [baseGraph]);
+  const haloVisuals = useMemo(() => {
     const palette = [
       { fill: "rgba(59,130,246,0.12)", stroke: "rgba(37,99,235,0.55)" },
       { fill: "rgba(249,115,22,0.12)", stroke: "rgba(234,88,12,0.55)" },
@@ -1545,17 +1630,20 @@ export default function InterlockingDirectorsApp() {
       { fill: "rgba(165,180,252,0.12)", stroke: "rgba(99,102,241,0.5)" },
       { fill: "rgba(251,191,36,0.12)", stroke: "rgba(217,119,6,0.5)" }
     ];
-    const groups = filteredDirectorCliques;
-    return groups.map((clique, index) => {
-      const paletteEntry = palette[index % palette.length];
-      return {
-        key: `clique-${index}`,
-        nodeIds: clique.members.map(name => `P:${name}`),
-        fill: paletteEntry.fill,
-        stroke: paletteEntry.stroke
-      };
-    });
-  }, [filteredDirectorCliques]);
+    const groups = haloMode === "company" ? companyHaloGroups : filteredDirectorCliques;
+    return groups
+      .map((group, index) => {
+        const paletteEntry = palette[index % palette.length];
+        const nodeIds = (group.members || []).map(name => `P:${name}`);
+        return {
+          key: haloMode === "company" ? `company-${group.label}` : `clique-${index}`,
+          nodeIds,
+          fill: paletteEntry.fill,
+          stroke: paletteEntry.stroke
+        };
+      })
+      .filter(group => group.nodeIds.length >= 2);
+  }, [companyHaloGroups, filteredDirectorCliques, haloMode]);
 
   const updateSelectionOverlayPosition = useCallback(() => {
     const net = networkRef.current;
@@ -1684,7 +1772,7 @@ export default function InterlockingDirectorsApp() {
       const visibleIds = new Set((visibleNodesRef.current || []).map(node => node.id));
       const scale = typeof net.getScale === "function" ? net.getScale() || 1 : 1;
 
-      cliqueVisuals.forEach(clique => {
+      haloVisuals.forEach(clique => {
         const ids = clique.nodeIds.filter(id => visibleIds.has(id));
         if (ids.length < 2) return;
 
@@ -1707,18 +1795,17 @@ export default function InterlockingDirectorsApp() {
 
         if (!polygonDom || polygonDom.length < 3) return;
 
+        if (polygonDom.length >= 3) {
+          polygonDom = smoothPolygon(polygonDom, 2);
+        }
+
         const canvasPolygon = polygonDom
           .map(point => net.DOMtoCanvas(point))
           .filter(point => point && Number.isFinite(point.x) && Number.isFinite(point.y));
         if (canvasPolygon.length < 3) return;
 
         ctx.save();
-        ctx.beginPath();
-        canvasPolygon.forEach((point, index) => {
-          if (index === 0) ctx.moveTo(point.x, point.y);
-          else ctx.lineTo(point.x, point.y);
-        });
-        ctx.closePath();
+        drawRoundedPolygon(ctx, canvasPolygon, 28 / scale);
         ctx.fillStyle = clique.fill;
         ctx.strokeStyle = clique.stroke;
         ctx.lineWidth = 2 / scale;
@@ -1733,7 +1820,7 @@ export default function InterlockingDirectorsApp() {
     return () => {
       net.off('afterDrawing', drawCliques);
     };
-  }, [cliqueVisuals]);
+  }, [haloVisuals]);
 
   const renderCentralityItems = (items, keyPrefix, includeConnections = false) => {
     if (!items || items.length === 0) {
@@ -1953,6 +2040,20 @@ export default function InterlockingDirectorsApp() {
             </div>
 
             <div className="border-t border-slate-100 pt-3">
+              <div className="text-sm font-semibold mb-2">Halo grouping</div>
+              <select
+                id="halo-mode"
+                value={haloMode}
+                onChange={(event) => setHaloMode(event.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-white p-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="clique">Director cliques</option>
+                <option value="company">Company boards</option>
+              </select>
+              <p className="text-xs text-slate-500 mt-2 leading-snug">{haloDescription}</p>
+            </div>
+
+            <div className="border-t border-slate-100 pt-3">
               <div className="text-sm font-semibold mb-2">Legend</div>
               {viewMode === "bipartite" ? (
                 <>
@@ -1966,7 +2067,7 @@ export default function InterlockingDirectorsApp() {
                       Company (box)
                     </div>
                   </div>
-                  <p className="text-xs text-slate-500 mt-2">Dots scale with number of boards served; edges show direct board appointments. Shaded halos outline detected director cliques.</p>
+                  <p className="text-xs text-slate-500 mt-2">Dots scale with number of boards served; edges show direct board appointments. {haloDescription}</p>
                 </>
               ) : viewMode === "company" ? (
                 <>
@@ -1980,7 +2081,7 @@ export default function InterlockingDirectorsApp() {
                       Directors (ring)
                     </div>
                   </div>
-                  <p className="text-xs text-slate-500 mt-2">All companies are pinned at the center of their director circles. Shared directors fall between the clusters they connect.</p>
+                  <p className="text-xs text-slate-500 mt-2">All companies are pinned at the center of their director circles. Shared directors fall between the clusters they connect. {haloDescription}</p>
                 </>
               ) : (
                 <>
@@ -1994,7 +2095,7 @@ export default function InterlockingDirectorsApp() {
                       Companies (ring)
                     </div>
                   </div>
-                  <p className="text-xs text-slate-500 mt-2">Each director is centered with their companies orbiting them. Companies shared by multiple leaders float between overlapping webs.</p>
+                  <p className="text-xs text-slate-500 mt-2">Each director is centered with their companies orbiting them. Companies shared by multiple leaders float between overlapping webs. {haloDescription}</p>
                 </>
               )}
             </div>
