@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, Upload, RefreshCw, FileDown, Search, Info } from "lucide-react";
 import { Network } from "vis-network/standalone";
 
@@ -94,6 +94,28 @@ const DEGREE_COPY = {
       ? "Showing the focused director with all of their companies."
       : `Hiding companies with fewer than ${value} direct link${value === 1 ? "" : "s"} to the focused director.`
   }
+};
+
+const PERSON_PALETTE = {
+  baseBackground: "#2563eb",
+  baseBorder: "#1e40af",
+  highlightBackground: "#1d4ed8",
+  highlightBorder: "#1e3a8a",
+  focusBackground: "#1e3a8a",
+  focusBorder: "#0f172a",
+  mutedBackground: "#bfdbfe",
+  mutedBorder: "#93c5fd"
+};
+
+const COMPANY_PALETTE = {
+  baseBackground: "#f59e0b",
+  baseBorder: "#b45309",
+  highlightBackground: "#f97316",
+  highlightBorder: "#c2410c",
+  focusBackground: "#ea580c",
+  focusBorder: "#9a3412",
+  mutedBackground: "#fde68a",
+  mutedBorder: "#facc15"
 };
 
 // Lightweight CSV parser for lines like: name, company
@@ -634,6 +656,193 @@ function buildFocusGraph(base, bipartiteGraph, focusId) {
   return { nodes, edges, nodeDegrees, physicsEnabled: false };
 }
 
+function applyFocusHighlight(base, graph, focusNode) {
+  const nodes = (graph.nodes || []).map(node => ({ ...node }));
+  const edges = (graph.edges || []).map(edge => ({ ...edge }));
+
+  if (!focusNode || !focusNode.id) {
+    return { nodes, edges, highlightedIds: new Set() };
+  }
+
+  const type = getNodeType(focusNode.id);
+  if (type === "unknown") {
+    return { nodes, edges, highlightedIds: new Set() };
+  }
+
+  const label = focusNode.label;
+  const neighborLabels = type === "person"
+    ? base.personAffiliations.get(label) || []
+    : base.companyAffiliations.get(label) || [];
+  const neighborIds = new Set(neighborLabels.map(name => type === "person" ? `C:${name}` : `P:${name}`));
+  neighborIds.add(focusNode.id);
+
+  const decoratedNodes = nodes.map(node => {
+    const isPerson = node.id.startsWith("P:");
+    const palette = isPerson ? PERSON_PALETTE : COMPANY_PALETTE;
+
+    if (!neighborIds.has(node.id)) {
+      return {
+        ...node,
+        color: {
+          background: palette.mutedBackground,
+          border: palette.mutedBorder,
+          highlight: { background: palette.highlightBackground, border: palette.highlightBorder },
+          hover: { background: palette.highlightBackground, border: palette.highlightBorder }
+        },
+        borderWidth: 1
+      };
+    }
+
+    if (node.id === focusNode.id) {
+      const font = node.font ? { ...node.font, size: Math.max((node.font.size || 14), 18) } : { size: 18 };
+      return {
+        ...node,
+        color: {
+          background: palette.focusBackground,
+          border: palette.focusBorder,
+          highlight: { background: palette.focusBackground, border: palette.focusBorder },
+          hover: { background: palette.focusBackground, border: palette.focusBorder }
+        },
+        borderWidth: Math.max(3, (node.borderWidth || 1) + 2),
+        shadow: {
+          enabled: true,
+          color: "rgba(15,23,42,0.2)",
+          size: 26,
+          x: 0,
+          y: 0
+        },
+        font
+      };
+    }
+
+    return {
+      ...node,
+      color: {
+        background: palette.highlightBackground,
+        border: palette.highlightBorder,
+        highlight: { background: palette.highlightBackground, border: palette.highlightBorder },
+        hover: { background: palette.highlightBackground, border: palette.highlightBorder }
+      },
+      borderWidth: Math.max(2, (node.borderWidth || 1) + 1)
+    };
+  });
+
+  const decoratedEdges = edges.map(edge => {
+    const connectsHighlight = neighborIds.has(edge.from) && neighborIds.has(edge.to);
+    if (!connectsHighlight) {
+      return {
+        ...edge,
+        width: 1,
+        color: {
+          color: "rgba(148,163,184,0.25)",
+          highlight: "rgba(100,116,139,0.35)",
+          opacity: 0.18
+        },
+        smooth: false
+      };
+    }
+
+    const connectsFocus = edge.from === focusNode.id || edge.to === focusNode.id;
+    return {
+      ...edge,
+      width: connectsFocus ? 3.4 : 2.2,
+      color: {
+        color: connectsFocus ? "#1f2937" : "#334155",
+        highlight: "#0f172a",
+        opacity: connectsFocus ? 0.75 : 0.6
+      },
+      smooth: false
+    };
+  });
+
+  return { nodes: decoratedNodes, edges: decoratedEdges, highlightedIds: neighborIds };
+}
+
+function buildCentricLayout(base, bipartiteGraph, centerType, focusNode) {
+  const nodes = bipartiteGraph.nodes.map(node => ({ ...node }));
+  const edges = bipartiteGraph.edges.map(edge => ({ ...edge }));
+  const nodeLookup = new Map(nodes.map(node => [node.id, node]));
+
+  const centers = centerType === "company" ? base.companies : base.people;
+  const centerPrefix = centerType === "company" ? "C:" : "P:";
+  const orbitPrefix = centerType === "company" ? "P:" : "C:";
+  const affiliationMap = centerType === "company" ? base.companyAffiliations : base.personAffiliations;
+
+  if (centers.length > 0) {
+    const cols = Math.ceil(Math.sqrt(centers.length));
+    const rows = Math.ceil(centers.length / cols);
+    const cellWidth = 420;
+    const cellHeight = 320;
+    const xOffset = (cols - 1) / 2;
+    const yOffset = (rows - 1) / 2;
+
+    centers.forEach((label, index) => {
+      const id = `${centerPrefix}${label}`;
+      const node = nodeLookup.get(id);
+      if (!node) return;
+      const row = Math.floor(index / cols);
+      const col = index % cols;
+      const x = (col - xOffset) * cellWidth;
+      const y = (row - yOffset) * cellHeight;
+      node.x = x;
+      node.y = y;
+      node.physics = false;
+      node.fixed = { x: true, y: true };
+    });
+  }
+
+  const orbitPositions = new Map();
+  centers.forEach((label) => {
+    const centerId = `${centerPrefix}${label}`;
+    const centerNode = nodeLookup.get(centerId);
+    if (!centerNode) return;
+    const affiliations = affiliationMap.get(label) || [];
+    if (affiliations.length === 0) return;
+    const sorted = [...affiliations].sort((a, b) => a.localeCompare(b));
+    const count = sorted.length;
+    const radius = 130 + Math.min(200, count * 28);
+
+    sorted.forEach((neighborName, index) => {
+      const neighborId = `${orbitPrefix}${neighborName}`;
+      if (!nodeLookup.has(neighborId)) return;
+      const angle = (2 * Math.PI * index) / count;
+      const targetX = centerNode.x + Math.cos(angle) * radius;
+      const targetY = centerNode.y + Math.sin(angle) * radius;
+      const existing = orbitPositions.get(neighborId) || { x: 0, y: 0, count: 0 };
+      existing.x += targetX;
+      existing.y += targetY;
+      existing.count += 1;
+      orbitPositions.set(neighborId, existing);
+    });
+  });
+
+  orbitPositions.forEach((value, id) => {
+    const node = nodeLookup.get(id);
+    if (!node) return;
+    node.x = value.x / value.count;
+    node.y = value.y / value.count;
+    node.physics = false;
+    node.fixed = { x: true, y: true };
+  });
+
+  nodes.forEach(node => {
+    if (typeof node.x === "number" && typeof node.y === "number") {
+      node.physics = false;
+      node.fixed = { x: true, y: true };
+    }
+  });
+
+  const highlighted = applyFocusHighlight(base, { nodes, edges }, focusNode);
+
+  return {
+    nodes: highlighted.nodes,
+    edges: highlighted.edges,
+    nodeDegrees: bipartiteGraph.nodeDegrees,
+    physicsEnabled: false,
+    base: bipartiteGraph
+  };
+}
+
 function buildVisualization(base, mode, focusNode) {
   const bipartiteGraph = createBipartiteGraph(base);
   if (mode === "bipartite") {
@@ -645,19 +854,11 @@ function buildVisualization(base, mode, focusNode) {
   }
 
   if (mode === "company") {
-    const focusId = focusNode && focusNode.id && focusNode.id.startsWith("C:")
-      ? focusNode.id
-      : null;
-    const focused = buildFocusGraph(base, bipartiteGraph, focusId);
-    return { ...focused, base: bipartiteGraph };
+    return buildCentricLayout(base, bipartiteGraph, "company", focusNode);
   }
 
   if (mode === "director") {
-    const focusId = focusNode && focusNode.id && focusNode.id.startsWith("P:")
-      ? focusNode.id
-      : null;
-    const focused = buildFocusGraph(base, bipartiteGraph, focusId);
-    return { ...focused, base: bipartiteGraph };
+    return buildCentricLayout(base, bipartiteGraph, "director", focusNode);
   }
 
   return { ...bipartiteGraph, physicsEnabled: true, base: bipartiteGraph };
@@ -785,7 +986,9 @@ export default function InterlockingDirectorsApp() {
   const pngUrlRef = useRef(null);
   const [selectedNode, setSelectedNode] = useState(null);
   const [focusNode, setFocusNode] = useState(null);
+  const [selectionPosition, setSelectionPosition] = useState(null);
   const visibleNodesRef = useRef([]);
+  const overlayPositionRef = useRef(null);
 
   const updatePngUrl = (url) => {
     if (pngUrlRef.current && pngUrlRef.current.startsWith('blob:')) {
@@ -829,25 +1032,17 @@ export default function InterlockingDirectorsApp() {
 
   useEffect(() => {
     if (viewMode === "company") {
-      if (!focusNode || !focusNode.id || !focusNode.id.startsWith("C:")) {
-        const first = baseGraph.companies[0];
-        if (first) {
-          setFocusNode({ id: `C:${first}`, label: first, type: "company" });
-        } else {
-          setFocusNode(null);
-        }
+      if (focusNode && !focusNode.id.startsWith("C:")) {
+        setFocusNode(null);
       }
     } else if (viewMode === "director") {
-      if (!focusNode || !focusNode.id || !focusNode.id.startsWith("P:")) {
-        const first = baseGraph.people[0];
-        if (first) {
-          setFocusNode({ id: `P:${first}`, label: first, type: "person" });
-        } else {
-          setFocusNode(null);
-        }
+      if (focusNode && !focusNode.id.startsWith("P:")) {
+        setFocusNode(null);
       }
+    } else if (viewMode === "bipartite" && focusNode) {
+      setFocusNode(null);
     }
-  }, [viewMode, baseGraph, focusNode]);
+  }, [viewMode, focusNode]);
 
   useEffect(() => {
     setMinDegree(prev => (prev > maxDegree ? maxDegree : prev));
@@ -858,8 +1053,8 @@ export default function InterlockingDirectorsApp() {
 
   const modeDescriptions = {
     bipartite: "Directors connect directly to the companies where they serve. Use the focus controls to center any node and view its immediate ties.",
-    company: "Highlights one company in the middle with its directors orbiting around it. Pick a different company by using the focus controls.",
-    director: "Highlights one director in the middle with their companies surrounding them. Switch focus to another director to inspect their web of boards."
+    company: "Rebalances the entire network so every company sits at the heart of its director circle. Shared directors naturally land between overlapping firms.",
+    director: "Repositions the full graph with directors anchoring their companies. Firms shared by multiple directors fall between the cliques they connect."
   };
 
   const viewOptions = [
@@ -973,6 +1168,26 @@ export default function InterlockingDirectorsApp() {
     const net = networkRef.current;
     if (!net) return;
 
+    const handle = () => updateSelectionOverlayPosition();
+    net.on('dragging', handle);
+    net.on('dragEnd', handle);
+    net.on('zoom', handle);
+    net.on('animationFinished', handle);
+    net.on('afterDrawing', handle);
+
+    return () => {
+      net.off('dragging', handle);
+      net.off('dragEnd', handle);
+      net.off('zoom', handle);
+      net.off('animationFinished', handle);
+      net.off('afterDrawing', handle);
+    };
+  }, [updateSelectionOverlayPosition]);
+
+  useEffect(() => {
+    const net = networkRef.current;
+    if (!net) return;
+
     const findNode = (id) => {
       const visible = (visibleNodesRef.current || []).find(node => node.id === id);
       if (visible) return visible;
@@ -986,27 +1201,75 @@ export default function InterlockingDirectorsApp() {
       const id = params.nodes[0];
       const node = findNode(id);
       const label = node?.label || id.replace(/^P:/, "").replace(/^C:/, "");
-      setSelectedNode({ id, label, type: getNodeType(id) });
+      const selection = { id, label, type: getNodeType(id) };
+      setSelectedNode(selection);
+      setTimeout(() => updateSelectionOverlayPosition(), 0);
     };
 
-    const handleDeselectNode = () => setSelectedNode(null);
+    const handleDeselectNode = () => {
+      setSelectedNode(null);
+      overlayPositionRef.current = null;
+      setSelectionPosition(null);
+    };
 
     const handleClick = (params) => {
       if (!params.nodes || params.nodes.length === 0) {
         setSelectedNode(null);
+        overlayPositionRef.current = null;
+        setSelectionPosition(null);
       }
+    };
+
+    const handleDoubleClick = (params) => {
+      if (!params.nodes || params.nodes.length === 0) return;
+      const id = params.nodes[0];
+      const node = findNode(id);
+      const label = node?.label || id.replace(/^P:/, "").replace(/^C:/, "");
+      const type = getNodeType(id);
+      const selection = { id, label, type };
+      setSelectedNode(selection);
+      if (type === "company" && viewMode !== "company") {
+        setViewMode("company");
+      } else if (type === "person" && viewMode !== "director") {
+        setViewMode("director");
+      }
+      setFocusNode(selection);
+      setTimeout(() => updateSelectionOverlayPosition(), 0);
     };
 
     net.on('selectNode', handleSelectNode);
     net.on('deselectNode', handleDeselectNode);
     net.on('click', handleClick);
+    net.on('doubleClick', handleDoubleClick);
 
     return () => {
       net.off('selectNode', handleSelectNode);
       net.off('deselectNode', handleDeselectNode);
       net.off('click', handleClick);
+      net.off('doubleClick', handleDoubleClick);
     };
-  }, [displayGraph, baseGraph]);
+  }, [displayGraph, baseGraph, viewMode, updateSelectionOverlayPosition]);
+
+  useEffect(() => {
+    const net = networkRef.current;
+    if (!net) return;
+    if (!focusNode || !focusNode.id) return;
+
+    const visible = new Set((visibleNodesRef.current || []).map(node => node.id));
+    if (!visible.has(focusNode.id)) return;
+
+    const animation = { duration: 600, easingFunction: 'easeInOutQuad' };
+    const scale = viewMode === "bipartite" ? 1 : 0.9;
+
+    try {
+      net.focus(focusNode.id, { scale, animation });
+    } catch (err) {
+      const position = net.getPositions([focusNode.id])[focusNode.id];
+      if (position && Number.isFinite(position.x) && Number.isFinite(position.y)) {
+        net.moveTo({ position, scale, animation });
+      }
+    }
+  }, [focusNode, viewMode, displayGraph, minDegree]);
 
   const exportPNG = async () => {
     const captureCanvasImage = async (canvas) => {
@@ -1294,6 +1557,37 @@ export default function InterlockingDirectorsApp() {
     });
   }, [report.cliques]);
 
+  const updateSelectionOverlayPosition = useCallback(() => {
+    const net = networkRef.current;
+    if (!net || !selectedNode) {
+      if (overlayPositionRef.current !== null) {
+        overlayPositionRef.current = null;
+        setSelectionPosition(null);
+      }
+      return;
+    }
+
+    const positions = net.getPositions([selectedNode.id]);
+    const pos = positions[selectedNode.id];
+    if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) {
+      overlayPositionRef.current = null;
+      setSelectionPosition(null);
+      return;
+    }
+
+    const domPoint = net.canvasToDOM(pos);
+    const next = { id: selectedNode.id, x: domPoint.x, y: domPoint.y };
+    const prev = overlayPositionRef.current;
+    if (!prev || prev.id !== next.id || Math.abs(prev.x - next.x) > 1 || Math.abs(prev.y - next.y) > 1) {
+      overlayPositionRef.current = next;
+      setSelectionPosition({ x: next.x, y: next.y });
+    }
+  }, [selectedNode]);
+
+  useEffect(() => {
+    updateSelectionOverlayPosition();
+  }, [updateSelectionOverlayPosition, displayGraph]);
+
 
   useEffect(() => {
     const net = networkRef.current;
@@ -1302,6 +1596,7 @@ export default function InterlockingDirectorsApp() {
     const drawCliques = (ctx) => {
       if (!ctx) return;
       const visibleIds = new Set((visibleNodesRef.current || []).map(node => node.id));
+      const ratio = net?.canvas?.pixelRatio || window.devicePixelRatio || 1;
       cliqueVisuals.forEach(clique => {
         const ids = clique.nodeIds.filter(id => visibleIds.has(id));
         if (ids.length < 2) return;
@@ -1323,16 +1618,21 @@ export default function InterlockingDirectorsApp() {
 
         if (!polygon || polygon.length < 3) return;
 
+        const scaledPolygon = polygon.map(point => ({
+          x: point.x * ratio,
+          y: point.y * ratio
+        }));
+
         ctx.save();
         ctx.beginPath();
-        polygon.forEach((point, index) => {
+        scaledPolygon.forEach((point, index) => {
           if (index === 0) ctx.moveTo(point.x, point.y);
           else ctx.lineTo(point.x, point.y);
         });
         ctx.closePath();
         ctx.fillStyle = clique.fill;
         ctx.strokeStyle = clique.stroke;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2 * ratio;
         ctx.fill();
         ctx.stroke();
         ctx.restore();
@@ -1360,6 +1660,12 @@ export default function InterlockingDirectorsApp() {
       </li>
     ));
   };
+
+  const focusButtonLabel = selectedNode?.type === "company"
+    ? "Center company cluster"
+    : selectedNode?.type === "person"
+      ? "Center director web"
+      : "Focus connections";
 
   const handleFocusSelection = () => {
     if (!selectedNode) return;
@@ -1465,7 +1771,16 @@ export default function InterlockingDirectorsApp() {
                       key={option.key}
                       type="button"
                       aria-pressed={isActive}
-                      onClick={() => setViewMode(option.key)}
+                      onClick={() => {
+                        setViewMode(option.key);
+                        if (option.key === "bipartite") {
+                          setFocusNode(null);
+                        } else if (option.key === "company") {
+                          setFocusNode(prev => (prev && prev.id.startsWith("C:") ? prev : null));
+                        } else if (option.key === "director") {
+                          setFocusNode(prev => (prev && prev.id.startsWith("P:") ? prev : null));
+                        }
+                      }}
                       className={[
                         "rounded-xl px-3 py-2 border transition",
                         isActive
@@ -1509,7 +1824,7 @@ export default function InterlockingDirectorsApp() {
                       Directors (ring)
                     </div>
                   </div>
-                  <p className="text-xs text-slate-500 mt-2">The selected company stays in the middle with its directors arranged around it.</p>
+                  <p className="text-xs text-slate-500 mt-2">All companies are pinned at the center of their director circles. Shared directors fall between the clusters they connect.</p>
                 </>
               ) : (
                 <>
@@ -1523,14 +1838,14 @@ export default function InterlockingDirectorsApp() {
                       Companies (ring)
                     </div>
                   </div>
-                  <p className="text-xs text-slate-500 mt-2">The selected director anchors the view with their companies orbiting around them.</p>
+                  <p className="text-xs text-slate-500 mt-2">Each director is centered with their companies orbiting them. Companies shared by multiple leaders float between overlapping webs.</p>
                 </>
               )}
             </div>
 
             <div className="border-t border-slate-100 pt-3 space-y-2">
               <div className="text-sm font-semibold">Focus layout</div>
-              <p className="text-xs text-slate-500 leading-snug">Select a node on the canvas and click focus to center it and display its direct connections like a web.</p>
+              <p className="text-xs text-slate-500 leading-snug">Select a node on the canvas and click focus to center it and display its direct connections like a web. You can also double-click any node to jump straight into its cluster.</p>
               {focusNode ? (
                 <div className="flex items-center justify-between text-xs text-slate-600">
                   <span>Focused on: <span className="font-medium text-slate-700">{focusNode.label}</span></span>
@@ -1747,7 +2062,31 @@ export default function InterlockingDirectorsApp() {
         {/* Right: Graph */}
         <section className="lg:col-span-2">
           <div className="bg-white rounded-2xl shadow p-2 h-[72vh]">
-            <div ref={containerRef} className="h-full w-full rounded-2xl" />
+            <div className="relative h-full w-full rounded-2xl">
+              <div ref={containerRef} className="h-full w-full rounded-2xl" />
+              {selectedNode && selectionPosition && (
+                <div
+                  className="pointer-events-none absolute z-20"
+                  style={{ left: selectionPosition.x, top: selectionPosition.y }}
+                >
+                  <div className="pointer-events-auto -translate-x-1/2 -translate-y-4 whitespace-nowrap rounded-xl bg-white/95 px-3 py-2 text-xs shadow-lg ring-1 ring-slate-200">
+                    <div className="font-semibold text-slate-700">{selectedNode.label}</div>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        handleFocusSelection();
+                      }}
+                      className="mt-1 w-full rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white shadow hover:opacity-90"
+                    >
+                      {focusButtonLabel}
+                    </button>
+                    <div className="mt-1 text-[11px] text-slate-500">Double-click the node to center instantly.</div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </section>
       </main>
