@@ -499,6 +499,7 @@ function genReport(graph) {
     }
   };
 
+  const cliqueUniverse = findCliques(directorAdjacency, 2);
   const cliqueResult = findCliques(directorAdjacency);
   const directorCliques = cliqueResult.cliques.map(members => ({
     members,
@@ -526,7 +527,8 @@ function genReport(graph) {
     cliques: {
       directorCliques,
       crossCliqueConnectors,
-      threshold: cliqueResult.threshold
+      threshold: cliqueResult.threshold,
+      allCliques: cliqueUniverse.cliques
     }
   };
 }
@@ -977,6 +979,7 @@ function useDebounced(value, delay = 300) {
 export default function InterlockingDirectorsApp() {
   const [raw, setRaw] = useState(SAMPLE);
   const [minDegree, setMinDegree] = useState(0);
+  const [cliqueSizeFilter, setCliqueSizeFilter] = useState(3);
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState("bipartite");
   const [debugEnabled, setDebugEnabled] = useState(false);
@@ -1507,9 +1510,32 @@ export default function InterlockingDirectorsApp() {
     betweenness: report.centrality?.companies?.betweenness || [],
     centralization: report.centrality?.companies?.centralization || defaultCentralization
   };
-  const directorCliques = report.cliques?.directorCliques || [];
-  const crossCliqueConnectors = report.cliques?.crossCliqueConnectors || [];
-  const cliqueThreshold = report.cliques?.threshold || 3;
+  const allDirectorCliques = useMemo(() => {
+    const raw = report.cliques?.allCliques;
+    if (raw && raw.length > 0) {
+      return raw.map(members => ({ members, size: members.length }));
+    }
+    const fallback = report.cliques?.directorCliques || [];
+    return fallback.map(clique => ({ members: clique.members, size: clique.size ?? clique.members.length }));
+  }, [report]);
+  const maxDirectorCliqueSize = useMemo(() => {
+    return allDirectorCliques.reduce((max, clique) => Math.max(max, clique.size), 0);
+  }, [allDirectorCliques]);
+  const sliderMaxCliqueSize = Math.max(2, maxDirectorCliqueSize);
+  useEffect(() => {
+    const defaultThreshold = Math.max(2, report.cliques?.threshold || 3);
+    const next = Math.min(defaultThreshold, sliderMaxCliqueSize);
+    setCliqueSizeFilter(prev => (prev !== next ? next : prev));
+  }, [report, sliderMaxCliqueSize]);
+  const activeCliqueThreshold = Math.min(Math.max(2, cliqueSizeFilter || 2), sliderMaxCliqueSize);
+  const filteredDirectorCliques = useMemo(
+    () => allDirectorCliques.filter(clique => clique.size >= activeCliqueThreshold),
+    [allDirectorCliques, activeCliqueThreshold]
+  );
+  const crossCliqueConnectors = useMemo(
+    () => computeCrossCliqueConnectors(filteredDirectorCliques.map(clique => clique.members)),
+    [filteredDirectorCliques]
+  );
   const cliqueVisuals = useMemo(() => {
     const palette = [
       { fill: "rgba(59,130,246,0.12)", stroke: "rgba(37,99,235,0.55)" },
@@ -1519,7 +1545,7 @@ export default function InterlockingDirectorsApp() {
       { fill: "rgba(165,180,252,0.12)", stroke: "rgba(99,102,241,0.5)" },
       { fill: "rgba(251,191,36,0.12)", stroke: "rgba(217,119,6,0.5)" }
     ];
-    const groups = report.cliques?.directorCliques || [];
+    const groups = filteredDirectorCliques;
     return groups.map((clique, index) => {
       const paletteEntry = palette[index % palette.length];
       return {
@@ -1529,7 +1555,7 @@ export default function InterlockingDirectorsApp() {
         stroke: paletteEntry.stroke
       };
     });
-  }, [report.cliques]);
+  }, [filteredDirectorCliques]);
 
   const updateSelectionOverlayPosition = useCallback(() => {
     const net = networkRef.current;
@@ -1656,43 +1682,46 @@ export default function InterlockingDirectorsApp() {
     const drawCliques = (ctx) => {
       if (!ctx) return;
       const visibleIds = new Set((visibleNodesRef.current || []).map(node => node.id));
-      const ratio = net?.canvas?.pixelRatio || window.devicePixelRatio || 1;
+      const scale = typeof net.getScale === "function" ? net.getScale() || 1 : 1;
+
       cliqueVisuals.forEach(clique => {
         const ids = clique.nodeIds.filter(id => visibleIds.has(id));
         if (ids.length < 2) return;
+
         const positions = net.getPositions(ids);
-        const points = ids
+        const domPoints = ids
           .map(id => positions[id])
           .filter(pos => pos && Number.isFinite(pos.x) && Number.isFinite(pos.y))
-          .map(pos => net.canvasToDOM(pos));
-        if (points.length < 2) return;
+          .map(pos => net.canvasToDOM(pos))
+          .filter(point => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+        if (domPoints.length < 2) return;
 
-        let polygon;
-        if (points.length === 2) {
-          polygon = buildCapsuleAroundPair(points[0], points[1], 28);
+        let polygonDom;
+        if (domPoints.length === 2) {
+          polygonDom = buildCapsuleAroundPair(domPoints[0], domPoints[1], 28);
         } else {
-          const hull = computeConvexHull(points);
+          const hull = computeConvexHull(domPoints);
           if (hull.length === 0) return;
-          polygon = expandPolygon(hull, 36);
+          polygonDom = expandPolygon(hull, 36);
         }
 
-        if (!polygon || polygon.length < 3) return;
+        if (!polygonDom || polygonDom.length < 3) return;
 
-        const scaledPolygon = polygon.map(point => ({
-          x: point.x * ratio,
-          y: point.y * ratio
-        }));
+        const canvasPolygon = polygonDom
+          .map(point => net.DOMtoCanvas(point))
+          .filter(point => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+        if (canvasPolygon.length < 3) return;
 
         ctx.save();
         ctx.beginPath();
-        scaledPolygon.forEach((point, index) => {
+        canvasPolygon.forEach((point, index) => {
           if (index === 0) ctx.moveTo(point.x, point.y);
           else ctx.lineTo(point.x, point.y);
         });
         ctx.closePath();
         ctx.fillStyle = clique.fill;
         ctx.strokeStyle = clique.stroke;
-        ctx.lineWidth = 2 * ratio;
+        ctx.lineWidth = 2 / scale;
         ctx.fill();
         ctx.stroke();
         ctx.restore();
@@ -2129,24 +2158,59 @@ export default function InterlockingDirectorsApp() {
 
               <div>
                 <div className="text-sm font-semibold mb-1">Director cliques</div>
-                {directorCliques.length > 0 ? (
+                {allDirectorCliques.length > 0 ? (
                   <>
-                    <p className="text-xs text-slate-500">
-                      {cliqueThreshold >= 3
-                        ? `Cliques require at least ${cliqueThreshold} directors all connected through shared boards.`
-                        : "No 3+ director cliques detected; displaying tightly linked director pairs."}
-                    </p>
-                    <ul className="text-xs space-y-1 max-h-40 overflow-auto pr-1 mt-2">
-                      {directorCliques.map((clique, index) => (
-                        <li key={`clique-${clique.members.join('|')}`} className="flex flex-col gap-1">
-                          <div className="flex justify-between gap-2">
-                            <span>Group {index + 1}</span>
-                            <span className="text-slate-500">{clique.size} {clique.size === 1 ? "member" : "members"}</span>
-                          </div>
-                          <div className="text-slate-500">{clique.members.join(" • ")}</div>
-                        </li>
-                      ))}
-                    </ul>
+                    <div className="space-y-2">
+                      <div>
+                        <label
+                          htmlFor="clique-size-filter"
+                          className="flex items-center justify-between text-xs text-slate-500"
+                        >
+                          <span>Minimum clique size</span>
+                          <span className="font-medium text-slate-700">
+                            {activeCliqueThreshold} {activeCliqueThreshold === 1 ? "member" : "members"}
+                          </span>
+                        </label>
+                        <input
+                          id="clique-size-filter"
+                          type="range"
+                          min={2}
+                          max={sliderMaxCliqueSize}
+                          step={1}
+                          value={activeCliqueThreshold}
+                          onChange={(event) => setCliqueSizeFilter(Number(event.target.value))}
+                          className="mt-1 w-full"
+                          disabled={sliderMaxCliqueSize <= 2}
+                        />
+                        {sliderMaxCliqueSize <= 2 ? (
+                          <p className="mt-1 text-[11px] text-slate-400">
+                            Only director pairs are available for highlighting.
+                          </p>
+                        ) : null}
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        {activeCliqueThreshold >= 3
+                          ? `Highlighting groups with ${activeCliqueThreshold}+ directors sharing board seats.`
+                          : "Highlighting tightly linked director pairs."}
+                      </p>
+                    </div>
+                    {filteredDirectorCliques.length > 0 ? (
+                      <ul className="text-xs space-y-1 max-h-40 overflow-auto pr-1 mt-2">
+                        {filteredDirectorCliques.map((clique, index) => (
+                          <li key={`clique-${clique.members.join('|')}`} className="flex flex-col gap-1">
+                            <div className="flex justify-between gap-2">
+                              <span>Group {index + 1}</span>
+                              <span className="text-slate-500">{clique.size} {clique.size === 1 ? "member" : "members"}</span>
+                            </div>
+                            <div className="text-slate-500">{clique.members.join(" • ")}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-xs text-slate-500">
+                        No director cliques meet this size filter. Lower the slider to reveal smaller groups.
+                      </p>
+                    )}
                   </>
                 ) : (
                   <p className="text-xs text-slate-500">No director cliques detected.</p>
