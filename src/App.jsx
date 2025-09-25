@@ -1222,91 +1222,7 @@ export default function InterlockingDirectorsApp() {
     }
   }, [displayGraph, selectedNode]);
 
-  useEffect(() => {
-    const net = networkRef.current;
-    if (!net) return;
-
-    const handle = () => updateSelectionOverlayPosition();
-    net.on('dragging', handle);
-    net.on('dragEnd', handle);
-    net.on('zoom', handle);
-    net.on('animationFinished', handle);
-    net.on('afterDrawing', handle);
-
-    return () => {
-      net.off('dragging', handle);
-      net.off('dragEnd', handle);
-      net.off('zoom', handle);
-      net.off('animationFinished', handle);
-      net.off('afterDrawing', handle);
-    };
-  }, [updateSelectionOverlayPosition]);
-
-  useEffect(() => {
-    const net = networkRef.current;
-    if (!net) return;
-
-    const findNode = (id) => {
-      const visible = (visibleNodesRef.current || []).find(node => node.id === id);
-      if (visible) return visible;
-      const baseNode = (displayGraph.base?.nodes || []).find(node => node.id === id);
-      if (baseNode) return baseNode;
-      return baseGraph.nodes.find(node => node.id === id);
-    };
-
-    const handleSelectNode = (params) => {
-      if (!params.nodes || params.nodes.length === 0) return;
-      const id = params.nodes[0];
-      const node = findNode(id);
-      const label = node?.label || id.replace(/^P:/, "").replace(/^C:/, "");
-      const selection = { id, label, type: getNodeType(id) };
-      setSelectedNode(selection);
-      setTimeout(() => updateSelectionOverlayPosition(), 0);
-    };
-
-    const handleDeselectNode = () => {
-      setSelectedNode(null);
-      overlayPositionRef.current = null;
-      setSelectionPosition(null);
-    };
-
-    const handleClick = (params) => {
-      if (!params.nodes || params.nodes.length === 0) {
-        setSelectedNode(null);
-        overlayPositionRef.current = null;
-        setSelectionPosition(null);
-      }
-    };
-
-    const handleDoubleClick = (params) => {
-      if (!params.nodes || params.nodes.length === 0) return;
-      const id = params.nodes[0];
-      const node = findNode(id);
-      const label = node?.label || id.replace(/^P:/, "").replace(/^C:/, "");
-      const type = getNodeType(id);
-      const selection = { id, label, type };
-      setSelectedNode(selection);
-      if (type === "company" && viewMode !== "company") {
-        setViewMode("company");
-      } else if (type === "person" && viewMode !== "director") {
-        setViewMode("director");
-      }
-      setFocusNode(selection);
-      setTimeout(() => updateSelectionOverlayPosition(), 0);
-    };
-
-    net.on('selectNode', handleSelectNode);
-    net.on('deselectNode', handleDeselectNode);
-    net.on('click', handleClick);
-    net.on('doubleClick', handleDoubleClick);
-
-    return () => {
-      net.off('selectNode', handleSelectNode);
-      net.off('deselectNode', handleDeselectNode);
-      net.off('click', handleClick);
-      net.off('doubleClick', handleDoubleClick);
-    };
-  }, [displayGraph, baseGraph, viewMode, updateSelectionOverlayPosition]);
+  
 
   useEffect(() => {
     const net = networkRef.current;
@@ -1641,6 +1557,92 @@ export default function InterlockingDirectorsApp() {
       setSelectionPosition({ x: next.x, y: next.y });
     }
   }, [selectedNode]);
+
+  useEffect(() => {
+    const net = networkRef.current;
+    if (!net) return;
+
+    const handle = () => updateSelectionOverlayPosition();
+    net.on('dragging', handle);
+    net.on('dragEnd', handle);
+    net.on('zoom', handle);
+    net.on('animationFinished', handle);
+    net.on('afterDrawing', handle);
+
+    return () => {
+      net.off('dragging', handle);
+      net.off('dragEnd', handle);
+      net.off('zoom', handle);
+      net.off('animationFinished', handle);
+      net.off('afterDrawing', handle);
+    };
+  }, [updateSelectionOverlayPosition]);
+
+  useEffect(() => {
+    const net = networkRef.current;
+    if (!net) return;
+
+    const findNode = (id) => {
+      const visible = (visibleNodesRef.current || []).find(node => node.id === id);
+      if (visible) return visible;
+      const baseNode = (displayGraph.base?.nodes || []).find(node => node.id === id);
+      if (baseNode) return baseNode;
+      return baseGraph.nodes.find(node => node.id === id);
+    };
+
+    const handleSelectNode = (params) => {
+      if (!params.nodes || params.nodes.length === 0) return;
+      const id = params.nodes[0];
+      const node = findNode(id);
+      const label = node?.label || id.replace(/^P:/, "").replace(/^C:/, "");
+      const selection = { id, label, type: getNodeType(id) };
+      setSelectedNode(selection);
+      setTimeout(() => updateSelectionOverlayPosition(), 0);
+    };
+
+    const handleDeselectNode = () => {
+      setSelectedNode(null);
+      overlayPositionRef.current = null;
+      setSelectionPosition(null);
+    };
+
+    const handleClick = (params) => {
+      if (!params.nodes || params.nodes.length === 0) {
+        setSelectedNode(null);
+        overlayPositionRef.current = null;
+        setSelectionPosition(null);
+      }
+    };
+
+    const handleDoubleClick = (params) => {
+      if (!params.nodes || params.nodes.length === 0) return;
+      const id = params.nodes[0];
+      const node = findNode(id);
+      const label = node?.label || id.replace(/^P:/, "").replace(/^C:/, "");
+      const type = getNodeType(id);
+      const selection = { id, label, type };
+      setSelectedNode(selection);
+      if (type === "company" && viewMode !== "company") {
+        setViewMode("company");
+      } else if (type === "person" && viewMode !== "director") {
+        setViewMode("director");
+      }
+      setFocusNode(selection);
+      setTimeout(() => updateSelectionOverlayPosition(), 0);
+    };
+
+    net.on('selectNode', handleSelectNode);
+    net.on('deselectNode', handleDeselectNode);
+    net.on('click', handleClick);
+    net.on('doubleClick', handleDoubleClick);
+
+    return () => {
+      net.off('selectNode', handleSelectNode);
+      net.off('deselectNode', handleDeselectNode);
+      net.off('click', handleClick);
+      net.off('doubleClick', handleDoubleClick);
+    };
+  }, [displayGraph, baseGraph, viewMode, updateSelectionOverlayPosition]);
 
   useEffect(() => {
     updateSelectionOverlayPosition();
