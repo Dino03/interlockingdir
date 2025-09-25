@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Download, Upload, RefreshCw, FileDown, Search, Info } from "lucide-react";
+import { Download, Upload, RefreshCw, FileDown, Search, Info, Bug } from "lucide-react";
 import { Network } from "vis-network/standalone";
 
 /**
@@ -979,6 +979,9 @@ export default function InterlockingDirectorsApp() {
   const [minDegree, setMinDegree] = useState(0);
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState("bipartite");
+  const [debugEnabled, setDebugEnabled] = useState(false);
+  const [debugEvents, setDebugEvents] = useState([]);
+  const [runtimeError, setRuntimeError] = useState(null);
   const debouncedQuery = useDebounced(query, 200);
   const containerRef = useRef(null);
   const networkRef = useRef(null);
@@ -989,6 +992,24 @@ export default function InterlockingDirectorsApp() {
   const [selectionPosition, setSelectionPosition] = useState(null);
   const visibleNodesRef = useRef([]);
   const overlayPositionRef = useRef(null);
+
+  const appendDebug = useCallback((type, payload) => {
+    setDebugEvents(prev => {
+      const now = new Date();
+      const iso = now.toISOString();
+      const timeLabel = iso.split("T")[1]?.replace("Z", "").slice(0, 8) || iso;
+      const next = [{
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: iso,
+        timeLabel,
+        type,
+        payload
+      }, ...prev];
+      return next.slice(0, 60);
+    });
+  }, []);
+
+  const clearDebug = useCallback(() => setDebugEvents([]), []);
 
   const updatePngUrl = (url) => {
     if (pngUrlRef.current && pngUrlRef.current.startsWith('blob:')) {
@@ -1067,94 +1088,131 @@ export default function InterlockingDirectorsApp() {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const q = debouncedQuery.trim().toLowerCase();
-    const queryActive = q.length > 0;
-    const availableNodes = displayGraph.nodes || [];
-    const availableEdges = displayGraph.edges || [];
-    const physicsEnabled = displayGraph.physicsEnabled !== false;
+    setRuntimeError(null);
 
-    let allowedIds = null;
-    if (queryActive) {
-      const matched = new Set();
-      availableNodes.forEach(node => {
-        const label = (node.label || "").toLowerCase();
-        if (label.includes(q)) matched.add(node.id);
-      });
-      const neighbors = new Set();
-      availableEdges.forEach(edge => {
-        if (matched.has(edge.from)) neighbors.add(edge.to);
-        if (matched.has(edge.to)) neighbors.add(edge.from);
-      });
-      allowedIds = new Set([...matched, ...neighbors]);
-    }
+    try {
+      const q = debouncedQuery.trim().toLowerCase();
+      const queryActive = q.length > 0;
+      const availableNodes = displayGraph.nodes || [];
+      const availableEdges = displayGraph.edges || [];
+      const physicsEnabled = displayGraph.physicsEnabled !== false;
 
-    const nodes = availableNodes.filter(node => {
-      const deg = displayGraph.nodeDegrees.get(node.id) || 0;
-      const passDeg = deg >= (minDegree || 0);
-      if (!queryActive) return passDeg;
-      if (allowedIds && allowedIds.size > 0) {
-        return passDeg && allowedIds.has(node.id);
+      let allowedIds = null;
+      if (queryActive) {
+        const matched = new Set();
+        availableNodes.forEach(node => {
+          const label = (node.label || "").toLowerCase();
+          if (label.includes(q)) matched.add(node.id);
+        });
+        const neighbors = new Set();
+        availableEdges.forEach(edge => {
+          if (matched.has(edge.from)) neighbors.add(edge.to);
+          if (matched.has(edge.to)) neighbors.add(edge.from);
+        });
+        allowedIds = new Set([...matched, ...neighbors]);
       }
-      return false;
-    });
 
-    const nodeSet = new Set(nodes.map(node => node.id));
-    const edges = availableEdges.filter(edge => nodeSet.has(edge.from) && nodeSet.has(edge.to));
+      const nodes = availableNodes.filter(node => {
+        const deg = displayGraph.nodeDegrees.get(node.id) || 0;
+        const passDeg = deg >= (minDegree || 0);
+        if (!queryActive) return passDeg;
+        if (allowedIds && allowedIds.size > 0) {
+          return passDeg && allowedIds.has(node.id);
+        }
+        return false;
+      });
 
-    visibleNodesRef.current = nodes;
+      const nodeSet = new Set(nodes.map(node => node.id));
+      const edges = availableEdges.filter(edge => nodeSet.has(edge.from) && nodeSet.has(edge.to));
 
-    const options = {
-      autoResize: true,
-      physics: {
-        enabled: physicsEnabled,
-        solver: 'barnesHut',
-        stabilization: physicsEnabled ? { iterations: 400, fit: true } : false,
-        barnesHut: {
-          gravitationalConstant: -8000,
-          centralGravity: 0.15,
-          springLength: 180,
-          springConstant: 0.02,
-          damping: 0.75,
-          avoidOverlap: 0.3
+      visibleNodesRef.current = nodes;
+
+      const options = {
+        autoResize: true,
+        physics: {
+          enabled: physicsEnabled,
+          solver: 'barnesHut',
+          stabilization: physicsEnabled ? { iterations: 400, fit: true } : false,
+          barnesHut: {
+            gravitationalConstant: -8000,
+            centralGravity: 0.15,
+            springLength: 180,
+            springConstant: 0.02,
+            damping: 0.75,
+            avoidOverlap: 0.3
+          },
+          timestep: 0.25,
+          adaptiveTimestep: physicsEnabled,
+          minVelocity: physicsEnabled ? 1.0 : 0.5
         },
-        timestep: 0.25,
-        adaptiveTimestep: physicsEnabled,
-        minVelocity: physicsEnabled ? 1.0 : 0.5
-      },
-      layout: { improvedLayout: physicsEnabled },
-      nodes: {
-        shadow: true,
-        font: { face: "Inter, system-ui, sans-serif", size: 14 }
-      },
-      edges: {
-        smooth: false,
-        arrows: { to: { enabled: false } },
-        color: { opacity: 0.4 }
-      },
-      interaction: { hover: true, tooltipDelay: 120, navigationButtons: true, keyboard: true }
-    };
+        layout: { improvedLayout: physicsEnabled },
+        nodes: {
+          shadow: true,
+          font: { face: "Inter, system-ui, sans-serif", size: 14 }
+        },
+        edges: {
+          smooth: false,
+          arrows: { to: { enabled: false } },
+          color: { opacity: 0.4 }
+        },
+        interaction: { hover: true, tooltipDelay: 120, navigationButtons: true, keyboard: true }
+      };
 
-    const data = { nodes, edges };
+      const data = { nodes, edges };
 
-    if (!networkRef.current) {
-      networkRef.current = new Network(containerRef.current, data, options);
-    } else {
-      networkRef.current.setOptions(options);
-      networkRef.current.setData(data);
-    }
-
-    const net = networkRef.current;
-    if (net && !physicsEnabled) {
-      const nodeIds = nodes.map(node => node.id);
-      if (nodeIds.length > 0) {
-        net.fit({ nodes: nodeIds, animation: { duration: 600, easingFunction: 'easeInOutQuad' } });
+      if (!networkRef.current) {
+        networkRef.current = new Network(containerRef.current, data, options);
+        appendDebug("network:init", { nodes: nodes.length, edges: edges.length, physicsEnabled });
+      } else {
+        networkRef.current.setOptions(options);
+        networkRef.current.setData(data);
+        appendDebug("network:update", { nodes: nodes.length, edges: edges.length, physicsEnabled });
       }
-    }
 
-    const resize = () => net && net.redraw();
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
-  }, [displayGraph, minDegree, debouncedQuery]);
+      const net = networkRef.current;
+      if (net && !physicsEnabled) {
+        const nodeIds = nodes.map(node => node.id);
+        if (nodeIds.length > 0) {
+          net.fit({ nodes: nodeIds, animation: { duration: 600, easingFunction: 'easeInOutQuad' } });
+        }
+      }
+
+      const resize = () => net && net.redraw();
+      window.addEventListener("resize", resize);
+      return () => window.removeEventListener("resize", resize);
+    } catch (error) {
+      console.error(error);
+      setRuntimeError(error);
+      appendDebug("error", { stage: "network", message: error?.message || String(error) });
+    }
+  }, [displayGraph, minDegree, debouncedQuery, appendDebug]);
+
+  useEffect(() => {
+    appendDebug("data:rows", { count: rows.length });
+  }, [rows, appendDebug]);
+
+  useEffect(() => {
+    appendDebug("data:graph", {
+      nodes: baseGraph.nodes.length,
+      edges: baseGraph.edges.length
+    });
+  }, [baseGraph, appendDebug]);
+
+  useEffect(() => {
+    appendDebug("state:viewMode", { viewMode });
+  }, [viewMode, appendDebug]);
+
+  useEffect(() => {
+    appendDebug("state:focus", { focus: focusNode ? focusNode.id : null });
+  }, [focusNode, appendDebug]);
+
+  useEffect(() => {
+    appendDebug("state:minDegree", { minDegree });
+  }, [minDegree, appendDebug]);
+
+  useEffect(() => {
+    appendDebug("state:query", { query: debouncedQuery });
+  }, [debouncedQuery, appendDebug]);
 
   useEffect(() => {
     if (!selectedNode) return;
@@ -1695,6 +1753,22 @@ export default function InterlockingDirectorsApp() {
             <span>Interlocking Directors Analyzer</span>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setDebugEnabled(prev => !prev)}
+              className={[
+                "inline-flex items-center gap-2 rounded-2xl px-3 py-2 border transition",
+                debugEnabled
+                  ? "bg-slate-900 text-white border-slate-900 hover:opacity-90"
+                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+              ].join(" ")}
+            >
+              <Bug className="h-4 w-4" />
+              {debugEnabled ? "Hide debug" : "Show debug"}
+              {runtimeError ? (
+                <span className="ml-1 rounded-full bg-rose-500 px-1.5 text-[10px] font-semibold text-white">error</span>
+              ) : null}
+            </button>
             <button onClick={exportPNG} className="inline-flex items-center gap-2 rounded-2xl px-3 py-2 bg-slate-900 text-white hover:opacity-90 shadow">
               <Download className="h-4 w-4"/> Export PNG
             </button>
@@ -1705,9 +1779,60 @@ export default function InterlockingDirectorsApp() {
         </div>
       </header>
 
+      {runtimeError && (
+        <div className="mx-auto max-w-7xl px-4 pt-4">
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700 shadow">
+            <div className="font-semibold">Network rendering failed</div>
+            <p className="mt-1 break-words font-mono text-xs">
+              {runtimeError.message || 'An unknown error occurred while drawing the graph.'}
+            </p>
+            <p className="mt-2 text-xs text-rose-600">
+              The error details are captured in the debug inspector. Review the latest events below to diagnose blank screen issues.
+            </p>
+          </div>
+        </div>
+      )}
+
       <main className="mx-auto max-w-7xl p-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Left: Controls */}
         <section className="lg:col-span-1 space-y-4">
+          {debugEnabled && (
+            <div className="bg-slate-900 text-slate-100 rounded-2xl shadow p-4 space-y-3 max-h-80 overflow-auto">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-semibold">Debug inspector</div>
+                  <p className="text-xs text-slate-300">Latest app events appear here for troubleshooting blank screens.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearDebug}
+                  className="rounded-lg border border-slate-700 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-800"
+                >
+                  Clear
+                </button>
+              </div>
+              <div className="space-y-2 text-xs font-mono">
+                {debugEvents.length === 0 ? (
+                  <div className="rounded-xl border border-slate-700/60 bg-slate-800/60 px-3 py-2 text-slate-300">
+                    No debug events captured yet. Interact with the app or import data to populate this feed.
+                  </div>
+                ) : (
+                  debugEvents.map(event => (
+                    <div key={event.id} className="rounded-xl border border-slate-700/60 bg-slate-800/60 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="uppercase tracking-wide text-[10px] text-slate-400">{event.type}</span>
+                        <span className="text-[11px] text-slate-500">{event.timeLabel}</span>
+                      </div>
+                      <pre className="mt-1 whitespace-pre-wrap break-words text-[11px] text-slate-200">
+                        {JSON.stringify(event.payload, null, 2)}
+                      </pre>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="bg-white rounded-2xl shadow p-4 space-y-3">
             <div className="flex items-center gap-2 text-slate-700">
               <Info className="h-4 w-4"/>
