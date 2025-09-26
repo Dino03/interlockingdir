@@ -15,64 +15,26 @@ import { Network } from "vis-network/standalone";
 
 const SAMPLE = `# Director,Company (CSV; lines starting with # are comments)
 # Tip: A director can appear on multiple lines with different companies
-L. Garcia,Apex Mining
-Jane Dela Cruz,Apex Mining
-R. Mendoza,Aurora Biotech
-Jane Dela Cruz,Aurora Biotech
-H. Patel,Aurora Biotech
-P. Lim,Eastgate Foods
-L. Garcia,Eastgate Foods
-L. Garcia,Terra Finance
-K. Tan,Terra Finance
-C. Bautista,Terra Finance
-N. Singh,Empire Chemicals
-M. Yamada,Empire Chemicals
-M. Santos,Empire Chemicals
-C. Bautista,Empire Chemicals
-Alan Reyes,Empire Chemicals
-L. Garcia,Granite Cement
-Jane Dela Cruz,Granite Cement
-A. Ocampo,Granite Cement
-R. Mendoza,Helios Renewables
-M. Yamada,Helios Renewables
-Jane Dela Cruz,Helios Renewables
-E. Chen,Helios Renewables
-Alan Reyes,Helios Renewables
-S. Choi,Metro Orion
-H. Patel,Metro Orion
-E. Chen,Metro Orion
-C. Bautista,Metro Orion
-P. Lim,Northbridge Capital
-N. Singh,Northbridge Capital
-Jane Dela Cruz,Northbridge Capital
-D. Navarro,Northbridge Capital
-Alan Reyes,Northbridge Capital
-R. Mendoza,Atlantic Records
-M. Santos,Atlantic Records
-Jane Dela Cruz,Atlantic Records
-T. Wu,Pacifica Telecom
-S. Choi,Pacifica Telecom
-K. Tan,Pacifica Telecom
-T. Wu,Redwood Retail
-P. Lim,Silver Peak Logistics
-N. Singh,Silver Peak Logistics
-M. Yamada,Silver Peak Logistics
-M. Santos,Silver Peak Logistics
-T. Wu,Skyline Property
-S. Choi,Skyline Property
-K. Tan,Skyline Property
-T. Wu,Sunflare Corp
-Alan Reyes,Sunflare Corp
-P. Lim,Tristar Shipping
-D. Navarro,Tristar Shipping
-A. Ocampo,Tristar Shipping
-M. Santos,Zircon Industries
-K. Tan,Zircon Industries
-H. Patel,Zircon Industries
-E. Chen,Zircon Industries
-H. Patel,Zircon International
-D. Navarro,Zircon International
-C. Bautista,Zircon International
+Isabel Cortez,Atlas Renewables
+Miguel Santos,Atlas Renewables
+Priya Shah,Atlas Renewables
+Kenji Watanabe,Atlas Renewables
+Elena Morales,Atlas Renewables
+Miguel Santos,Harbor Logistics
+Priya Shah,Harbor Logistics
+Daniel Reyes,Harbor Logistics
+Lila Tan,Harbor Logistics
+Omar Velasco,Harbor Logistics
+Elena Morales,Northwind Banking
+Daniel Reyes,Northwind Banking
+Hannah Uy,Northwind Banking
+Carlo Medina,Northwind Banking
+Farah Singh,Northwind Banking
+Rafael Cruz,Silverline Foods
+Beatrice Lim,Silverline Foods
+Victor Gomez,Silverline Foods
+Alina Ortega,Silverline Foods
+Jonah Park,Silverline Foods
 `;
 
 const DEGREE_COPY = {
@@ -760,78 +722,132 @@ function applyFocusHighlight(base, graph, focusNode) {
   return { nodes: decoratedNodes, edges: decoratedEdges, highlightedIds: neighborIds };
 }
 
-function buildCentricLayout(base, bipartiteGraph, centerType, focusNode) {
-  const nodes = bipartiteGraph.nodes.map(node => ({ ...node }));
-  const edges = bipartiteGraph.edges.map(edge => ({ ...edge }));
-  const nodeLookup = new Map(nodes.map(node => [node.id, node]));
-
+function applyCircularClusterLayout(base, nodes, centerType, focusNode, options = {}) {
   const centers = centerType === "company" ? base.companies : base.people;
   const centerPrefix = centerType === "company" ? "C:" : "P:";
   const orbitPrefix = centerType === "company" ? "P:" : "C:";
   const affiliationMap = centerType === "company" ? base.companyAffiliations : base.personAffiliations;
+  const focusId = focusNode?.id || null;
+  const focusMatchesCenter = Boolean(focusId && focusId.startsWith(centerPrefix));
+  const focusMatchesOrbit = Boolean(focusId && focusId.startsWith(orbitPrefix));
+  const nodeLookup = new Map(nodes.map(node => [node.id, node]));
 
-  if (centers.length > 0) {
-    const cols = Math.ceil(Math.sqrt(centers.length));
-    const rows = Math.ceil(centers.length / cols);
-    const cellWidth = 420;
-    const cellHeight = 320;
-    const xOffset = (cols - 1) / 2;
-    const yOffset = (rows - 1) / 2;
-
-    centers.forEach((label, index) => {
-      const id = `${centerPrefix}${label}`;
-      const node = nodeLookup.get(id);
-      if (!node) return;
-      const row = Math.floor(index / cols);
-      const col = index % cols;
-      const x = (col - xOffset) * cellWidth;
-      const y = (row - yOffset) * cellHeight;
-      node.x = x;
-      node.y = y;
-      node.physics = false;
-      node.fixed = { x: true, y: true };
-    });
+  if (!centers || centers.length === 0) {
+    return;
   }
 
+  const sortedCenters = [...centers].sort((a, b) => a.localeCompare(b));
+  const centerSpacing = options.centerSpacing ?? (centerType === "company" ? 220 : 150);
+  const ringRadius = sortedCenters.length <= 1 ? 0 : Math.max(220, Math.sqrt(sortedCenters.length) * centerSpacing);
+  const orbitBase = options.orbitBase ?? (centerType === "company" ? 200 : 150);
+  const orbitStep = options.orbitStep ?? (centerType === "company" ? 36 : 30);
+  const focusWeight = options.focusWeight ?? 4;
+
+  const centerPositions = new Map();
+  sortedCenters.forEach((label, index) => {
+    const nodeId = `${centerPrefix}${label}`;
+    const node = nodeLookup.get(nodeId);
+    if (!node) return;
+    let x = 0;
+    let y = 0;
+    if (sortedCenters.length === 1 || (focusMatchesCenter && nodeId === focusId)) {
+      x = 0;
+      y = 0;
+    } else {
+      const angle = (2 * Math.PI * index) / sortedCenters.length;
+      x = Math.cos(angle) * ringRadius;
+      y = Math.sin(angle) * ringRadius;
+    }
+    centerPositions.set(nodeId, { x, y });
+  });
+
   const orbitPositions = new Map();
-  centers.forEach((label) => {
+  sortedCenters.forEach((label) => {
     const centerId = `${centerPrefix}${label}`;
     const centerNode = nodeLookup.get(centerId);
-    if (!centerNode) return;
-    const affiliations = affiliationMap.get(label) || [];
-    if (affiliations.length === 0) return;
-    const sorted = [...affiliations].sort((a, b) => a.localeCompare(b));
-    const count = sorted.length;
-    const radius = 130 + Math.min(200, count * 28);
+    const centerPos = centerPositions.get(centerId);
+    if (!centerNode || !centerPos) return;
 
-    sorted.forEach((neighborName, index) => {
+    centerNode.x = centerPos.x;
+    centerNode.y = centerPos.y;
+    centerNode.physics = false;
+    if (centerNode.fixed) delete centerNode.fixed;
+
+    const affiliations = affiliationMap.get(label) || [];
+    if (!affiliations.length) return;
+    const sortedAffiliations = [...affiliations].sort((a, b) => a.localeCompare(b));
+    const radius = orbitBase + Math.max(0, sortedAffiliations.length - 1) * orbitStep;
+
+    sortedAffiliations.forEach((neighborName, index) => {
       const neighborId = `${orbitPrefix}${neighborName}`;
       if (!nodeLookup.has(neighborId)) return;
-      const angle = (2 * Math.PI * index) / count;
-      const targetX = centerNode.x + Math.cos(angle) * radius;
-      const targetY = centerNode.y + Math.sin(angle) * radius;
-      const existing = orbitPositions.get(neighborId) || { x: 0, y: 0, count: 0 };
-      existing.x += targetX;
-      existing.y += targetY;
+      const angle = (2 * Math.PI * index) / sortedAffiliations.length;
+      const targetX = centerPos.x + Math.cos(angle) * radius;
+      const targetY = centerPos.y + Math.sin(angle) * radius;
+      const weight = focusMatchesCenter && centerId === focusId ? focusWeight : 1;
+      const existing = orbitPositions.get(neighborId) || { x: 0, y: 0, weight: 0, count: 0 };
+      existing.x += targetX * weight;
+      existing.y += targetY * weight;
+      existing.weight += weight;
       existing.count += 1;
       orbitPositions.set(neighborId, existing);
     });
   });
 
-  orbitPositions.forEach((value, id) => {
-    const node = nodeLookup.get(id);
+  orbitPositions.forEach((value, nodeId) => {
+    const node = nodeLookup.get(nodeId);
     if (!node) return;
-    node.x = value.x / value.count;
-    node.y = value.y / value.count;
+    const divisor = value.weight || value.count || 1;
+    node.x = value.x / divisor;
+    node.y = value.y / divisor;
     node.physics = false;
-    node.fixed = { x: true, y: true };
+    if (node.fixed) delete node.fixed;
   });
 
   nodes.forEach(node => {
     if (typeof node.x === "number" && typeof node.y === "number") {
       node.physics = false;
-      node.fixed = { x: true, y: true };
+      if (node.fixed) delete node.fixed;
     }
+  });
+
+  let anchor = null;
+  if (focusMatchesCenter && nodeLookup.has(focusId)) {
+    const centerNode = nodeLookup.get(focusId);
+    if (typeof centerNode.x === "number" && typeof centerNode.y === "number") {
+      anchor = { x: centerNode.x, y: centerNode.y };
+    }
+  } else if (focusMatchesOrbit && nodeLookup.has(focusId)) {
+    const orbitNode = nodeLookup.get(focusId);
+    if (typeof orbitNode.x === "number" && typeof orbitNode.y === "number") {
+      anchor = { x: orbitNode.x, y: orbitNode.y };
+    }
+  }
+
+  if (anchor) {
+    nodes.forEach(node => {
+      if (typeof node.x === "number" && typeof node.y === "number") {
+        node.x -= anchor.x;
+        node.y -= anchor.y;
+      }
+    });
+    if (focusId && nodeLookup.has(focusId)) {
+      const focusNodeEntry = nodeLookup.get(focusId);
+      focusNodeEntry.x = 0;
+      focusNodeEntry.y = 0;
+    }
+  }
+}
+
+function buildCentricLayout(base, bipartiteGraph, centerType, focusNode) {
+  const nodes = bipartiteGraph.nodes.map(node => ({ ...node }));
+  const edges = bipartiteGraph.edges.map(edge => ({ ...edge }));
+
+  applyCircularClusterLayout(base, nodes, centerType, focusNode, {
+    focusWeight: centerType === "company" ? 5 : 4,
+    centerSpacing: centerType === "company" ? 220 : 140,
+    orbitBase: centerType === "company" ? 200 : 140,
+    orbitStep: centerType === "company" ? 34 : 26
   });
 
   const highlighted = applyFocusHighlight(base, { nodes, edges }, focusNode);
@@ -852,7 +868,8 @@ function buildVisualization(base, mode, focusNode) {
       const focused = buildFocusGraph(base, bipartiteGraph, focusNode.id);
       return { ...focused, base: bipartiteGraph };
     }
-    return { ...bipartiteGraph, physicsEnabled: true, base: bipartiteGraph };
+    const circular = buildCentricLayout(base, bipartiteGraph, "company", null);
+    return { ...circular, base: bipartiteGraph };
   }
 
   if (mode === "company") {
@@ -1109,6 +1126,7 @@ export default function InterlockingDirectorsApp() {
     () => buildVisualization(baseGraph, viewMode, focusNode),
     [baseGraph, viewMode, focusNode]
   );
+  const focusNodeId = focusNode?.id || null;
   const maxDegree = useMemo(() => {
     const values = Array.from(displayGraph.nodeDegrees.values());
     return values.length ? Math.max(...values) : 0;
@@ -1244,7 +1262,7 @@ export default function InterlockingDirectorsApp() {
       }
 
       const net = networkRef.current;
-      if (net && !physicsEnabled) {
+      if (net && !physicsEnabled && !focusNodeId) {
         const nodeIds = nodes.map(node => node.id);
         if (nodeIds.length > 0) {
           net.fit({ nodes: nodeIds, animation: { duration: 600, easingFunction: 'easeInOutQuad' } });
@@ -1259,7 +1277,7 @@ export default function InterlockingDirectorsApp() {
       setRuntimeError(error);
       appendDebug("error", { stage: "network", message: error?.message || String(error) });
     }
-  }, [displayGraph, minDegree, debouncedQuery, appendDebug]);
+  }, [displayGraph, minDegree, debouncedQuery, appendDebug, focusNodeId]);
 
   useEffect(() => {
     appendDebug("data:rows", { count: rows.length });
@@ -1301,23 +1319,23 @@ export default function InterlockingDirectorsApp() {
   useEffect(() => {
     const net = networkRef.current;
     if (!net) return;
-    if (!focusNode || !focusNode.id) return;
+    if (!focusNodeId) return;
 
     const visible = new Set((visibleNodesRef.current || []).map(node => node.id));
-    if (!visible.has(focusNode.id)) return;
+    if (!visible.has(focusNodeId)) return;
 
     const animation = { duration: 600, easingFunction: 'easeInOutQuad' };
     const scale = viewMode === "bipartite" ? 1 : 0.9;
 
     try {
-      net.focus(focusNode.id, { scale, animation });
+      net.focus(focusNodeId, { scale, animation });
     } catch (err) {
-      const position = net.getPositions([focusNode.id])[focusNode.id];
+      const position = net.getPositions([focusNodeId])[focusNodeId];
       if (position && Number.isFinite(position.x) && Number.isFinite(position.y)) {
         net.moveTo({ position, scale, animation });
       }
     }
-  }, [focusNode, viewMode, displayGraph, minDegree]);
+  }, [focusNodeId, viewMode, displayGraph, minDegree]);
 
   const exportPNG = async () => {
     const captureCanvasImage = async (canvas) => {
@@ -1786,18 +1804,17 @@ export default function InterlockingDirectorsApp() {
 
         let polygonDom;
         if (domPoints.length === 2) {
-          polygonDom = buildCapsuleAroundPair(domPoints[0], domPoints[1], 28);
+          const capsule = buildCapsuleAroundPair(domPoints[0], domPoints[1], 32);
+          polygonDom = expandPolygon(capsule, 18);
         } else {
           const hull = computeConvexHull(domPoints);
           if (hull.length === 0) return;
-          polygonDom = expandPolygon(hull, 36);
+          const expandedHull = expandPolygon(hull, 36);
+          const smoothedHull = smoothPolygon(expandedHull, 2);
+          polygonDom = expandPolygon(smoothedHull, 16);
         }
 
         if (!polygonDom || polygonDom.length < 3) return;
-
-        if (polygonDom.length >= 3) {
-          polygonDom = smoothPolygon(polygonDom, 2);
-        }
 
         const canvasPolygon = polygonDom
           .map(point => net.DOMtoCanvas(point))
